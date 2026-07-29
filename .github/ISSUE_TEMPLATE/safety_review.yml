@@ -1,0 +1,85 @@
+name: Safety review
+description: Document and review a new or modified unsafe boundary.
+title: "[UNSAFE-XXX] "
+labels:
+  - safety-impact
+type: "Safety review"
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when introducing or modifying project-authored unsafe
+        code.
+
+        Replace `UNSAFE-XXX` in the title with the next available unsafe ID.
+        This issue should normally be linked to the implementation issue and
+        handled in the same branch and pull request.
+
+  - type: input
+    id: implementation-issue
+    attributes:
+      label: Related implementation issue
+      description: Link the issue whose implementation requires this unsafe boundary.
+      placeholder: "#41"
+    validations:
+      required: true
+
+  - type: textarea
+    id: unsafe-boundary
+    attributes:
+      label: Unsafe boundary
+      description: What operation or abstraction requires unsafe code?
+      placeholder: Type-erased storage and typed access for component columns.
+    validations:
+      required: true
+
+  - type: textarea
+    id: unsafe-justification
+    attributes:
+      label: Why unsafe is required
+      description: Why is a reasonable safe Rust implementation insufficient?
+      placeholder: |
+        The column stores values without knowing their concrete Rust type at
+        compile time and must reconstruct typed references from raw storage.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety-contract
+    attributes:
+      label: Safety contract
+      description: Describe the obligations and invariants that make the abstraction sound.
+      placeholder: |
+        - Component metadata matches every stored value.
+        - Accessed rows are initialized and within bounds.
+        - Allocations satisfy the component alignment.
+        - Shared and mutable references do not alias illegally.
+        - Every stored value is moved or dropped exactly once.
+    validations:
+      required: true
+
+  - type: textarea
+    id: invalidation
+    attributes:
+      label: Invalidation
+      description: Which pointers, references, handles, or indices become invalid, and when?
+      placeholder: |
+        Storage growth and component removal invalidate pointers and references
+        into the column.
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: List the tests and tools expected to cover this boundary.
+      placeholder: |
+        - Alignment tests
+        - Drop-counting tests
+        - Storage growth and removal tests
+        - Miri-compatible tests
+        - Manual review by another maintainer
+    validations:
+      required: true
