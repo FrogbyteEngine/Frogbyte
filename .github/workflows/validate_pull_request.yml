@@ -31,8 +31,6 @@ jobs:
             "ECS",
             "Renderer",
             "Integration",
-            "Sandbox",
-            "Workspace",
             "Infrastructure",
             "Docs",
           ];
