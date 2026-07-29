@@ -1,0 +1,97 @@
+name: Pull request policy
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Pull request policy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate title and issue reference
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          node <<'NODE'
+          const title = (process.env.PR_TITLE ?? "").trim();
+          const body = process.env.PR_BODY ?? "";
+
+          const allowedAreas = [
+            "ECS",
+            "Renderer",
+            "Integration",
+            "Sandbox",
+            "Workspace",
+            "Infrastructure",
+            "CI",
+            "Docs",
+            "Architecture",
+            "Safety",
+            "Dependencies",
+            "Legal",
+          ];
+
+          const escapedAreas = allowedAreas.map((area) =>
+            area.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+          );
+
+          const titlePattern = new RegExp(
+            `^(${escapedAreas.join("|")}): [A-Z0-9][^\\r\\n]*$`
+          );
+
+          const issueReferencePattern =
+            /\b(?:Closes|Fixes|Resolves|Refs)\s+(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+\b/i;
+
+          const errors = [];
+
+          if (!titlePattern.test(title)) {
+            errors.push(
+              "The title must use: <Area>: <Imperative description>."
+            );
+          }
+
+          if (title.length > 72) {
+            errors.push("The title must not exceed 72 characters.");
+          }
+
+          if (title.endsWith(".")) {
+            errors.push("The title must not end with a period.");
+          }
+
+          if (/\bWIP\b/i.test(title)) {
+            errors.push("Use GitHub's draft state instead of WIP in the title.");
+          }
+
+          if (!issueReferencePattern.test(body)) {
+            errors.push(
+              'The pull request body must contain "Closes #123" or "Refs #123".'
+            );
+          }
+
+          if (errors.length > 0) {
+            console.error(`Invalid pull request: "${title}"`);
+
+            for (const error of errors) {
+              console.error(`- ${error}`);
+            }
+
+            console.error(
+              'Example: Renderer: Recreate swapchain resources after resize'
+            );
+
+            process.exit(1);
+          }
+
+          console.log("The pull request follows the Frogbyte policy.");
+          NODE
