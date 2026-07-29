@@ -34,12 +34,7 @@ jobs:
             "Sandbox",
             "Workspace",
             "Infrastructure",
-            "CI",
             "Docs",
-            "Architecture",
-            "Safety",
-            "Dependencies",
-            "Legal",
           ];
 
           const escapedAreas = allowedAreas.map((area) =>
