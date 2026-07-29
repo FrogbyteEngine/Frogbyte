@@ -1,0 +1,211 @@
+name: Sync project review status
+
+on:
+  pull_request:
+    types:
+      - ready_for_review
+      - converted_to_draft
+
+permissions:
+  contents: read
+
+jobs:
+  update-linked-issues:
+    name: Update linked issue status
+    runs-on: ubuntu-latest
+
+    # Repository secrets are not exposed to pull requests from forks.
+    # Frogbyte currently accepts pull requests from repository branches only.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.PROJECT_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECT_AUTOMATION_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Update linked issue status
+        uses: actions/github-script@v9
+        env:
+          ORGANIZATION: FrogbyteEngine
+          PROJECT_NUMBER: ${{ vars.FROGBYTE_PROJECT_NUMBER }}
+          EVENT_ACTION: ${{ github.event.action }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const organization = process.env.ORGANIZATION;
+            const projectNumber = Number(process.env.PROJECT_NUMBER);
+            const action = process.env.EVENT_ACTION;
+
+            const targetStatus =
+              action === "ready_for_review"
+                ? "In review"
+                : "In progress";
+
+            if (!Number.isInteger(projectNumber)) {
+              core.setFailed(
+                "FROGBYTE_PROJECT_NUMBER must contain a valid project number."
+              );
+              return;
+            }
+
+            const projectResult = await github.graphql(
+              `
+                query GetProject(
+                  $organization: String!
+                  $projectNumber: Int!
+                ) {
+                  organization(login: $organization) {
+                    projectV2(number: $projectNumber) {
+                      id
+                      title
+                      fields(first: 100) {
+                        nodes {
+                          ... on ProjectV2SingleSelectField {
+                            id
+                            name
+                            options {
+                              id
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `,
+              {
+                organization,
+                projectNumber,
+              }
+            );
+
+            const project = projectResult.organization?.projectV2;
+
+            if (!project) {
+              core.setFailed(
+                `Project ${organization}/${projectNumber} was not found.`
+              );
+              return;
+            }
+
+            const statusField = project.fields.nodes.find(
+              (field) => field?.name === "Status"
+            );
+
+            if (!statusField) {
+              core.setFailed(
+                `The project "${project.title}" has no Status field.`
+              );
+              return;
+            }
+
+            const statusOption = statusField.options.find(
+              (option) => option.name === targetStatus
+            );
+
+            if (!statusOption) {
+              core.setFailed(
+                `The Status field has no "${targetStatus}" option.`
+              );
+              return;
+            }
+
+            const pullRequestResult = await github.graphql(
+              `
+                query GetClosingIssues(
+                  $owner: String!
+                  $repository: String!
+                  $pullRequestNumber: Int!
+                ) {
+                  repository(owner: $owner, name: $repository) {
+                    pullRequest(number: $pullRequestNumber) {
+                      closingIssuesReferences(first: 20) {
+                        nodes {
+                          number
+                          title
+                          projectItems(first: 50) {
+                            nodes {
+                              id
+                              project {
+                                id
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `,
+              {
+                owner: context.repo.owner,
+                repository: context.repo.repo,
+                pullRequestNumber: context.payload.pull_request.number,
+              }
+            );
+
+            const issues =
+              pullRequestResult.repository.pullRequest
+                .closingIssuesReferences.nodes;
+
+            if (issues.length === 0) {
+              core.warning(
+                "No closing issue was found. Use Closes #123 in the pull request body."
+              );
+              return;
+            }
+
+            for (const issue of issues) {
+              const projectItem = issue.projectItems.nodes.find(
+                (item) => item.project.id === project.id
+              );
+
+              if (!projectItem) {
+                core.warning(
+                  `Issue #${issue.number} is not present in "${project.title}".`
+                );
+                continue;
+              }
+
+              await github.graphql(
+                `
+                  mutation UpdateProjectStatus(
+                    $projectId: ID!
+                    $itemId: ID!
+                    $fieldId: ID!
+                    $optionId: String!
+                  ) {
+                    updateProjectV2ItemFieldValue(
+                      input: {
+                        projectId: $projectId
+                        itemId: $itemId
+                        fieldId: $fieldId
+                        value: {
+                          singleSelectOptionId: $optionId
+                        }
+                      }
+                    ) {
+                      projectV2Item {
+                        id
+                      }
+                    }
+                  }
+                `,
+                {
+                  projectId: project.id,
+                  itemId: projectItem.id,
+                  fieldId: statusField.id,
+                  optionId: statusOption.id,
+                }
+              );
+
+              core.info(
+                `Issue #${issue.number} moved to "${targetStatus}".`
+              );
+            }
