@@ -21,7 +21,7 @@ publish = false
 
 [workspace.dependencies]
 # Central definitions for internal workspace dependencies.
-frobyte_ecs = {path = "crates/frobyte_ecs"}
+frogbyte_ecs = {path = "crates/frogbyte_ecs"}
 frogbyte_render = {path = "crates/frogbyte_renderer"}
 
 [workspace.lints.rust]
