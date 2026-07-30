@@ -9,7 +9,6 @@ Documentation is kept in version control so that changes can be reviewed, discus
 | Document or directory | Purpose |
 |---|---:|
 | [`PROJECT_CHARTER.md`](PROJECT_CHARTER.md) | Purpose, vision, governance, current mission, and project boundaries |
-| [`milestones/`](milestones/) | Bounded deliverables, non-goals, entry gates, and completion criteria | Medium |
 | [`engineering/`](engineering/) | Testing, safety, benchmarking, dependency, CI, review, and versioning policies | Low to medium |
 
 ## Document hierarchy
@@ -19,7 +18,6 @@ Different documents answer different questions:
 | Document type | Main question |
 |---|---|
 | Project charter | Why does the project exist, and what governs it? |
-| Milestone | What must be delivered and validated now? |
 | Engineering policy | What rules govern implementation and validation? |
 
 ## Status vocabulary
