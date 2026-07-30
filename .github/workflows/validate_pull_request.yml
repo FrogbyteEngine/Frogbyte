@@ -33,6 +33,7 @@ jobs:
             "Integration",
             "Infrastructure",
             "Docs",
+            "Architecture",
           ];
 
           const escapedAreas = allowedAreas.map((area) =>
