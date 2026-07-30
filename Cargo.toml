@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+
+# List every package that belongs to this workspace.
+members = [
+    "crates/frogbyte_ecs",
+    "crates/frogbyte_renderer",
+]
+
+[workspace.package]
+# Shared package version inherited explicitly by each member.
+version = "0.1.0"
+
+edition = "2024"
+
+# Minimum Rust version officially supported by the packages.
+rust-version = "1.97.1"
+
+# Prevent accidental publication to Cargo registries.
+publish = false
+
+[workspace.dependencies]
+# Central definitions for internal workspace dependencies.
+frobyte_ecs = {path = "crates/frobyte_ecs"}
+frogbyte_render = {path = "crates/frogbyte_renderer"}
+
+[workspace.lints.rust]
+# Require explicit unsafe blocks even inside unsafe functions.
+unsafe_op_in_unsafe_fn = "deny"
+
+# Reject accidentally ignored values marked as must-use.
+unused_must_use = "deny"
+
+# Detect public items that are not actually reachable from another crate.
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Enable Clippy's standard lint group.
+all = { level = "warn", priority = -1 }
+
+# Correctness lints represent code that is considered wrong or useless.
+correctness = "deny"
+
+# Every unsafe block must have a local safety justification.
+undocumented_unsafe_blocks = "deny"
+
+# Every publicly visible unsafe function must document its contract.
+missing_safety_doc = "deny"
+
+# Prevent accidental debug macros from reaching accepted code.
+dbg_macro = "warn"
+
+# Make panic-prone convenience calls visible during review.
+unwrap_used = "warn"
