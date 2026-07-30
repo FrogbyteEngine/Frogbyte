@@ -1,0 +1,52 @@
+name: Miri
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "crates/frogbyte_ecs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/miri.yml"
+
+  push:
+    branches:
+      - main
+    paths:
+      - "crates/frogbyte_ecs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/miri.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: miri-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MIRI_TOOLCHAIN: nightly-2026-07-30
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ecs:
+    name: Miri / ECS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Miri toolchain
+        run: rustup toolchain install "$MIRI_TOOLCHAIN" --component miri
+
+      - name: Prepare Miri sysroot
+        run: cargo +"$MIRI_TOOLCHAIN" miri setup
+
+      - name: Test ECS with Miri
+        run: cargo +"$MIRI_TOOLCHAIN" miri test -p frogbyte_ecs
