@@ -1,4 +1,4 @@
-# Frogbyte Charter
+# Project Charter
 
 > [!IMPORTANT]
 > This charter defines the project's direction and the boundaries of the current phase. Detailed implementation requirements belong in milestone, architecture, and engineering documents.
