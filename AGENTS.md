@@ -25,12 +25,8 @@ and maintainable safety boundaries.
 The ECS and renderer are developed as independent tracks before a separate
 integration milestone.
 
-- `crates/frogbyte-ecs` contains the ECS implementation.
-- `crates/frogbyte-renderer` contains the renderer implementation.
-- `apps/frogbyte-sandbox` contains demonstrations and integration experiments.
-- The renderer must not depend on ECS storage internals.
-- ECS-to-renderer extraction belongs to the integration layer.
-- Public APIs must remain safe by default.
+- `crates/frogbyte_ecs` contains the ECS implementation.
+- `crates/frogbyte_renderer` contains the renderer implementation.
 
 ## Review priorities
 
