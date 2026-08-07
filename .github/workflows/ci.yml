@@ -1,0 +1,218 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  formatting:
+    name: Formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-2025
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Run Clippy
+        run: >
+          cargo clippy
+          --workspace
+          --all-targets
+          --all-features
+          --locked
+          --
+          -D warnings
+
+  tests:
+    name: Tests / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-2025
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Run tests
+        run: >
+          cargo test
+          --workspace
+          --all-targets
+          --all-features
+          --locked
+          --no-fail-fast
+
+  doctests:
+    name: Documentation tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Run documentation tests
+        run: >
+          cargo test
+          --workspace
+          --doc
+          --all-features
+          --locked
+          --no-fail-fast
+
+  rustdoc:
+    name: Rustdoc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Build documentation
+        run: >
+          cargo doc
+          --workspace
+          --all-features
+          --no-deps
+          --locked
+
+  release:
+    name: Release build / Windows
+    runs-on: windows-2025
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Build release workspace
+        run: >
+          cargo build
+          --workspace
+          --all-targets
+          --all-features
+          --release
+          --locked
+
+  required:
+    name: CI / Required
+    if: always()
+    needs:
+      - formatting
+      - clippy
+      - tests
+      - doctests
+      - rustdoc
+      - release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify required jobs
+        shell: bash
+        env:
+          FORMATTING: ${{ needs.formatting.result }}
+          CLIPPY: ${{ needs.clippy.result }}
+          TESTS: ${{ needs.tests.result }}
+          DOCTESTS: ${{ needs.doctests.result }}
+          RUSTDOC: ${{ needs.rustdoc.result }}
+          RELEASE: ${{ needs.release.result }}
+        run: |
+          set -euo pipefail
+
+          results=(
+            "$FORMATTING"
+            "$CLIPPY"
+            "$TESTS"
+            "$DOCTESTS"
+            "$RUSTDOC"
+            "$RELEASE"
+          )
+
+          for result in "${results[@]}"; do
+            if [[ "$result" != "success" ]]; then
+              echo "Required CI job failed, was skipped, or was cancelled: $result"
+              exit 1
+            fi
+          done
+
+          echo "All required CI jobs passed."
