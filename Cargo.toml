@@ -36,10 +36,10 @@ unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 # Enable Clippy's standard lint group.
-all = { level = "warn", priority = -1 }
+all = { level = "warn", priority = -2 }
 
 # Correctness lints represent code that is considered wrong or useless.
-correctness = "deny"
+correctness = { level = "deny", priority = -1 }
 
 # Every unsafe block must have a local safety justification.
 undocumented_unsafe_blocks = "deny"

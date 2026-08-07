@@ -1,0 +1,537 @@
+# Continuous Integration
+
+Frogbyte uses GitHub Actions to keep the repository reproducible, portable, and safe to change.
+
+The automation is split into several layers:
+
+- **Required CI** validates code quality and build correctness on every pull request and push to `main`.
+- **Security validation** checks dependency changes and GitHub Actions configuration.
+- **Miri** performs specialized undefined-behavior checks on the ECS.
+- **Pull request policy** enforces repository contribution conventions.
+- **Scheduled validation** detects future Rust or dependency compatibility problems before they affect development.
+- **Dependabot** keeps Rust dependencies and GitHub Actions up to date.
+- **Project automation** synchronizes linked issue status with the pull request lifecycle.
+
+## Required CI
+
+Workflow: `.github/workflows/ci.yml`
+
+The main CI workflow runs:
+
+- on pull requests targeting `main`;
+- on pushes to `main`;
+- when manually triggered with `workflow_dispatch`.
+
+For pull requests, an older CI run is cancelled when a newer commit is pushed to the same pull request. This avoids wasting runner time on obsolete revisions.
+
+The workflow uses the Rust toolchain defined in `rust-toolchain.toml`.
+
+### Formatting
+
+Runs on Linux:
+
+```shell
+cargo fmt --all -- --check
+```
+
+This verifies that every Rust source file follows the formatting produced by `rustfmt`.
+
+The check does not modify files. Run `cargo fmt --all` locally to automatically fix formatting differences.
+
+### Clippy
+
+Runs on both:
+
+- Ubuntu 24.04;
+- Windows Server 2025.
+
+```shell
+cargo clippy \
+    --workspace \
+    --all-targets \
+    --all-features \
+    --locked \
+    -- \
+    -D warnings
+```
+
+Clippy performs static analysis over the complete workspace.
+
+`-D warnings` promotes every warning to an error, preventing new warnings from being introduced into `main`.
+
+Running Clippy on both Linux and Windows also helps detect platform-specific compilation or linting differences.
+
+### Tests
+
+Runs on both Linux and Windows:
+
+```shell
+cargo test \
+    --workspace \
+    --all-targets \
+    --all-features \
+    --locked \
+    --no-fail-fast
+```
+
+This executes the complete workspace test suite.
+
+`--no-fail-fast` allows Cargo to continue running independent test targets after a failure so that CI can report as much information as possible in a single run.
+
+### Documentation tests
+
+Runs on Linux:
+
+```shell
+cargo test \
+    --workspace \
+    --doc \
+    --all-features \
+    --locked \
+    --no-fail-fast
+```
+
+Documentation examples are executable Rust code.
+
+Doctests make sure code examples in API documentation continue to compile and behave correctly as the implementation evolves.
+
+### Rustdoc
+
+Runs on Linux with:
+
+```text
+RUSTDOCFLAGS="-D warnings"
+```
+
+and:
+
+```shell
+cargo doc \
+    --workspace \
+    --all-features \
+    --no-deps \
+    --locked
+```
+
+This verifies that the complete public API documentation can be generated without warnings.
+
+`--no-deps` limits documentation generation to Frogbyte crates instead of rebuilding documentation for external dependencies.
+
+### Release build
+
+Runs on Windows:
+
+```shell
+cargo build \
+    --workspace \
+    --all-targets \
+    --all-features \
+    --release \
+    --locked
+```
+
+Tests and debug builds are not enough to guarantee that release compilation works.
+
+This job makes sure the complete workspace can also be built using release optimizations on the primary Windows target.
+
+### Required CI gate
+
+The `CI / Required` job depends on every main CI job:
+
+- Formatting;
+- Clippy;
+- Tests;
+- Documentation tests;
+- Rustdoc;
+- Release build.
+
+It succeeds only when all of them completed successfully.
+
+This provides a single stable status check that can be used as a branch-protection merge requirement while individual jobs remain free to evolve.
+
+## Security validation
+
+Workflow: `.github/workflows/security.yml`
+
+Security validation runs:
+
+- on pull requests targeting `main`;
+- on pushes to `main`;
+- when manually triggered.
+
+It covers dependency changes and the security of GitHub Actions themselves.
+
+### Dependency review
+
+Dependency review runs only on pull requests.
+
+It uses GitHub's dependency graph to compare dependencies before and after the pull request.
+
+The workflow rejects dependency changes that introduce a known vulnerability with a severity of:
+
+- moderate;
+- high;
+- critical.
+
+This protects the repository against accidentally introducing a known vulnerable dependency through `Cargo.toml` or `Cargo.lock`.
+
+The dependency graph must remain enabled in the repository settings for this check to work.
+
+### GitHub Actions security
+
+Frogbyte uses `zizmor` to audit the repository's GitHub Actions configuration.
+
+The analysis looks for workflow security problems such as:
+
+- mutable third-party action references;
+- overly broad permissions;
+- unsafe credential persistence;
+- dangerous GitHub App token usage;
+- insecure workflow expressions or configuration.
+
+Results are uploaded to GitHub Code Scanning as SARIF so findings can be inspected directly from the repository security interface.
+
+A successful `zizmor` job means the analyzer itself completed successfully. Findings may still be reported through Code Scanning depending on their severity and the analyzer configuration.
+
+### Required security gate
+
+`Security / Required` aggregates the security jobs into one stable status.
+
+On pull requests:
+
+- dependency review must succeed;
+- the GitHub Actions security analysis must succeed.
+
+On events where dependency review does not apply, its skipped state is accepted.
+
+## GitHub Actions supply-chain security
+
+External GitHub Actions execute code inside CI runners and are therefore part of Frogbyte's software supply chain.
+
+Actions should be pinned to immutable commit SHAs instead of mutable version tags.
+
+Prefer:
+
+```yaml
+uses: actions/checkout@<full-commit-sha> # vX.Y.Z
+```
+
+instead of:
+
+```yaml
+uses: actions/checkout@vX
+```
+
+The commit SHA guarantees that CI executes exactly the reviewed version of an action.
+
+The version comment remains for readability while Dependabot can propose future SHA updates through normal pull requests.
+
+Checkout steps should also use:
+
+```yaml
+with:
+  persist-credentials: false
+```
+
+unless Git credentials are explicitly required later in the job.
+
+GitHub tokens and GitHub App tokens should follow the principle of least privilege and receive only the permissions needed by their workflow.
+
+## Miri
+
+Workflow: `.github/workflows/miri.yml`
+
+Miri performs specialized validation for the ECS crate.
+
+It runs when a pull request or push affecting `main` changes:
+
+- `crates/frogbyte_ecs/**`;
+- `Cargo.toml`;
+- `Cargo.lock`;
+- the Miri workflow itself.
+
+It can also be triggered manually.
+
+Frogbyte pins a dedicated nightly toolchain for Miri:
+
+```text
+nightly-2026-07-30
+```
+
+The workflow installs Miri, prepares its sysroot, and executes:
+
+```shell
+cargo +"nightly-2026-07-30" miri test -p frogbyte_ecs
+```
+
+Miri interprets Rust code while checking operations that can result in undefined behavior.
+
+This is particularly useful for the ECS because low-level memory manipulation and future unsafe optimizations require stronger validation than normal unit tests can provide.
+
+Miri complements the normal test suite; it does not replace it.
+
+## Pull request policy
+
+Workflow: `.github/workflows/validate_pull_request.yml`
+
+Every pull request must follow the Frogbyte contribution policy.
+
+The expected title format is:
+
+```text
+<Area>: <Imperative description>
+```
+
+Supported areas are:
+
+- `ECS`;
+- `Renderer`;
+- `Integration`;
+- `Infrastructure`;
+- `Docs`;
+- `Architecture`;
+- `Dependencies`;
+- `CI`;
+- `Safety`.
+
+For example:
+
+```text
+Renderer: Recreate swapchain resources after resize
+```
+
+Pull request titles:
+
+- must match the expected area format;
+- must not exceed 72 characters;
+- must not end with a period;
+- must not contain `WIP`.
+
+GitHub's draft state should be used instead of adding `WIP` to the title.
+
+The pull request body must also reference an issue with one of the supported forms:
+
+```text
+Closes #123
+Fixes #123
+Resolves #123
+Refs #123
+```
+
+Repository-qualified issue references are also supported.
+
+This policy keeps the pull request history consistent and preserves traceability between changes and their related issues.
+
+## Scheduled validation
+
+Workflow: `.github/workflows/scheduled.yml`
+
+Some compatibility problems cannot be detected by testing only the currently pinned environment.
+
+A scheduled workflow therefore runs every Monday at `04:17 UTC` and can also be started manually.
+
+Scheduled validation is preventive and is not intended to replace the required pull request CI.
+
+### Future Rust compatibility
+
+The workspace test suite runs against:
+
+- Rust beta;
+- Rust nightly.
+
+```shell
+cargo +<toolchain> test \
+    --workspace \
+    --all-targets \
+    --all-features \
+    --locked \
+    --no-fail-fast
+```
+
+This provides early warning when an upcoming Rust release introduces a compiler, lint, or compatibility change that affects Frogbyte.
+
+The normal CI continues to use the pinned stable toolchain.
+
+### Latest compatible dependencies
+
+The scheduled workflow also executes:
+
+```shell
+cargo update
+```
+
+before running the test suite.
+
+This intentionally ignores the currently committed dependency resolution and asks Cargo to resolve the latest versions allowed by the manifests.
+
+It helps detect situations where:
+
+- `Cargo.lock` currently works;
+- the dependency version requirements are valid;
+- but a newly released compatible dependency breaks the project.
+
+Because this is an exploratory compatibility check, the updated lock file is not committed by the workflow.
+
+## Dependabot
+
+Configuration: `.github/dependabot.yml`
+
+Dependabot maintains two dependency ecosystems.
+
+### Rust dependencies
+
+Cargo dependencies are checked every Monday at `06:00` in the `Europe/Paris` timezone.
+
+### GitHub Actions
+
+GitHub Actions dependencies are checked every Monday at `06:30` in the `Europe/Paris` timezone.
+
+This is especially important because GitHub Actions are pinned to immutable commit SHAs.
+
+Dependabot can propose a pull request that moves a pinned action from one reviewed commit SHA to another instead of silently changing the action behind a mutable tag.
+
+### Pull request limits
+
+Dependabot can keep at most five open update pull requests per ecosystem.
+
+Dependabot commits use the `Dependencies` prefix so they comply with Frogbyte's pull request naming conventions.
+
+## Toolchain and reproducibility
+
+The repository pins its stable Rust environment in:
+
+```text
+rust-toolchain.toml
+```
+
+The current toolchain is:
+
+```text
+Rust 1.97.1
+```
+
+with the minimal profile plus:
+
+- `clippy`;
+- `rustfmt`.
+
+Using a repository-level toolchain file means developers and CI use the same Rust release automatically when using `rustup`.
+
+`Cargo.lock` is committed to the repository.
+
+Required CI commands use:
+
+```text
+--locked
+```
+
+This prevents Cargo from silently changing dependency resolution during validation.
+
+Together, the pinned Rust toolchain, committed lock file, and pinned GitHub Action SHAs make CI runs substantially more reproducible.
+
+## Project status automation
+
+Workflow: `.github/workflows/sync_project_review_status.yml`
+
+The project automation keeps the linked issue status synchronized with the pull request lifecycle.
+
+When a pull request becomes ready for review, its linked issue is moved to:
+
+```text
+In review
+```
+
+When the pull request is converted back to a draft, the linked issue is moved to:
+
+```text
+In progress
+```
+
+The workflow uses a GitHub App token with explicit least-privilege permissions for:
+
+- organization projects;
+- pull requests;
+- issues.
+
+Repository secrets are not exposed to pull requests from forks, so this automation only runs when the pull request branch belongs to the Frogbyte repository.
+
+This workflow does not validate code, but it is part of the repository automation surrounding the review process.
+
+## Local validation
+
+Before marking a pull request ready for review, run the main CI checks locally.
+
+```shell
+cargo fmt --all -- --check
+
+cargo clippy \
+    --workspace \
+    --all-targets \
+    --all-features \
+    --locked \
+    -- \
+    -D warnings
+
+cargo test \
+    --workspace \
+    --all-targets \
+    --all-features \
+    --locked \
+    --no-fail-fast
+
+cargo test \
+    --workspace \
+    --doc \
+    --all-features \
+    --locked \
+    --no-fail-fast
+
+cargo build \
+    --workspace \
+    --all-targets \
+    --all-features \
+    --release \
+    --locked
+```
+
+Validate Rust documentation on Bash-compatible shells with:
+
+```shell
+RUSTDOCFLAGS="-D warnings" \
+cargo doc \
+    --workspace \
+    --all-features \
+    --no-deps \
+    --locked
+```
+
+On PowerShell:
+
+```powershell
+$env:RUSTDOCFLAGS = "-D warnings"
+cargo doc --workspace --all-features --no-deps --locked
+Remove-Item Env:RUSTDOCFLAGS
+```
+
+When modifying the ECS or its low-level memory behavior, also run Miri:
+
+```shell
+rustup toolchain install nightly-2026-07-30 --component miri
+cargo +"nightly-2026-07-30" miri setup
+cargo +"nightly-2026-07-30" miri test -p frogbyte_ecs
+```
+
+Local validation reduces CI feedback time, but GitHub Actions remains the authoritative validation environment because it also verifies the project on the configured Linux and Windows runners.
+
+## Merge expectations
+
+Before merging a pull request:
+
+1. The pull request policy must pass.
+2. Required CI must pass.
+3. Required security validation must pass.
+4. Specialized checks such as Miri must pass when they apply.
+5. Relevant Code Scanning findings should be reviewed.
+6. The pull request should no longer be a draft.
+
+Scheduled compatibility checks and Dependabot are preventive maintenance mechanisms and are not substitutes for pull request validation.

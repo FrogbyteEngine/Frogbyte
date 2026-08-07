@@ -1,0 +1,87 @@
+name: Security
+
+on:
+  pull_request:
+    branches:
+      - main
+
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+
+  zizmor:
+    name: GitHub Actions security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Analyze GitHub Actions
+        uses: zizmorcore/zizmor-action@6fc4b006235f201fdab3722e17240ab420d580e5 # v0.6.1
+
+  required:
+    name: Security / Required
+    if: always()
+    needs:
+      - dependency-review
+      - zizmor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify security jobs
+        shell: bash
+        env:
+          DEPENDENCY_REVIEW: ${{ needs.dependency-review.result }}
+          ZIZMOR: ${{ needs.zizmor.result }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$ZIZMOR" != "success" ]]; then
+            echo "zizmor did not complete successfully: $ZIZMOR"
+            exit 1
+          fi
+
+          if [[ "$DEPENDENCY_REVIEW" != "success" && \
+                "$DEPENDENCY_REVIEW" != "skipped" ]]; then
+            echo "Dependency review did not complete successfully: $DEPENDENCY_REVIEW"
+            exit 1
+          fi
+
+          echo "All applicable security jobs passed."

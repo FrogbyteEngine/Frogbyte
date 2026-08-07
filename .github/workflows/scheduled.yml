@@ -1,0 +1,79 @@
+name: Scheduled validation
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-validation
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  future-rust:
+    name: Rust compatibility / ${{ matrix.toolchain }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain:
+          - beta
+          - nightly
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install "${{ matrix.toolchain }}" --profile minimal
+
+      - name: Show Rust toolchain
+        run: rustc +"${{ matrix.toolchain }}" --version --verbose
+
+      - name: Test workspace
+        run: >
+          cargo +"${{ matrix.toolchain }}"
+          test
+          --workspace
+          --all-targets
+          --all-features
+          --locked
+          --no-fail-fast
+
+  latest-dependencies:
+    name: Latest compatible dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Update dependencies
+        run: cargo update
+
+      - name: Test updated dependency resolution
+        run: >
+          cargo test
+          --workspace
+          --all-targets
+          --all-features
+          --no-fail-fast
