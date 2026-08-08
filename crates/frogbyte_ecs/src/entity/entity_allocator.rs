@@ -38,7 +38,7 @@ impl EntityAllocator {
 
         self.slots.push(slot);
         
-        Entity::new(self.slots.len() as u32, 0)
+        Entity::new((self.slots.len() -1) as u32, 0)
     }
 
     pub fn remove(&mut self, entity: Entity) -> Result<(), &str> {
