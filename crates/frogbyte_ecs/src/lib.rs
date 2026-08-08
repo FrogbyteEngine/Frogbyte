@@ -1,1 +1,1 @@
-// Entity Component System for Frogbyte.
+pub mod entity;
