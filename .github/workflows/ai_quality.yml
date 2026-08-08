@@ -41,10 +41,52 @@ jobs:
       QUALITY_TASK: ${{ github.event.label.name }}
 
     steps:
+      - name: Check command label is still active
+        id: command
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if gh api \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
+            --paginate \
+            --jq '.[].name' |
+            grep -Fxq "$QUALITY_TASK"; then
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Resolve the PR tip when this queued run actually starts. Multiple label
+      # events may have captured the same original head SHA, while an earlier
+      # queued quality task can push a newer commit before this run begins.
+      - name: Resolve current pull request head
+        id: pr_head
+        if: steps.command.outputs.active == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          sha="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+              --jq '.head.sha'
+          )"
+
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Check out current pull request branch
+        if: steps.command.outputs.active == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.pr_head.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -52,6 +94,7 @@ jobs:
       # pre-commit hook gives us a mechanical path boundary in addition to the
       # prompt/CLAUDE.md rules.
       - name: Install task scope guard
+        if: steps.command.outputs.active == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -71,7 +114,9 @@ jobs:
           }
 
           mapfile -t files < <(
-            git diff --cached --name-only --diff-filter=ACMR
+            # Disable rename detection so a rename is validated as one deletion
+            # plus one addition. This checks both the source and destination.
+            git diff --cached --name-only --diff-filter=ACMRD --no-renames
           )
 
           for file in "${files[@]}"; do
@@ -112,6 +157,7 @@ jobs:
 
       - name: Run Claude quality agent
         id: claude
+        if: steps.command.outputs.active == 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
         with:
@@ -187,12 +233,12 @@ jobs:
 
           claude_args: |
             --max-turns 20
-            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(cargo:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(gh pr comment:*)"
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(cargo:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh pr comment:*)"
             --disallowedTools "Bash(git commit --no-verify:*),Bash(git push --no-verify:*),Bash(git push --force:*),Bash(git push --force-with-lease:*),Bash(git rebase:*),Bash(git reset:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
 
       - name: Detect Claude subscription limit
         id: claude_limit
-        if: always()
+        if: always() && steps.command.outputs.active == 'true'
         shell: bash
         env:
           CLAUDE_STEP_OUTCOME: ${{ steps.claude.outcome }}
@@ -232,6 +278,25 @@ jobs:
             echo "reached=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Codex runs asynchronously after the @codex comment is posted. Clear all
+      # currently queued command labels first so older label events become
+      # no-ops when their runs leave the GitHub concurrency queue.
+      - name: Clear queued command labels before Codex fallback
+        if: steps.claude_limit.outputs.reached == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          for label in agent:tests agent:docs agent:benchmarks; do
+            gh api \
+              --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/${label}" \
+              >/dev/null 2>&1 || true
+          done
+
       - name: Trigger Codex fallback
         if: steps.claude_limit.outputs.reached == 'true'
         shell: bash
@@ -261,6 +326,10 @@ jobs:
 
           Claude could not continue because its included usage limit appears to have been reached.
 
+          Other queued AI quality command labels were cleared before starting
+          this fallback to avoid concurrent writers. They can be applied again
+          after this Codex task has completed.
+
           $TASK
 
           Follow the explicit quality-generation fallback rules in AGENTS.md.
@@ -282,6 +351,7 @@ jobs:
       - name: Report non-quota Claude failure
         if: >-
           always() &&
+          steps.command.outputs.active == 'true' &&
           steps.claude_limit.outputs.failed == 'true' &&
           steps.claude_limit.outputs.reached != 'true'
         shell: bash
@@ -296,7 +366,7 @@ jobs:
             -f body="Claude failed while processing \`${TASK_LABEL}\`, but the failure was not confidently identified as an included-usage quota limit. Codex fallback was intentionally not triggered. Check the AI Quality workflow run."
 
       - name: Remove command label
-        if: always()
+        if: always() && steps.command.outputs.active == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -311,6 +381,7 @@ jobs:
       - name: Fail workflow when Claude failed without fallback
         if: >-
           always() &&
+          steps.command.outputs.active == 'true' &&
           steps.claude_limit.outputs.failed == 'true' &&
           steps.claude_limit.outputs.reached != 'true'
         shell: bash
