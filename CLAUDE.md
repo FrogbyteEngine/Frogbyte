@@ -115,10 +115,15 @@ pull request.
 
 Allowed work:
 
-- Rustdoc on Rust items changed or introduced by the pull request;
-- explanatory source comments near changed code;
+- Rustdoc line comments (`///` and `//!`) on Rust items changed or introduced by
+  the pull request;
+- explanatory Rust line comments (`//`) near changed code;
 - documentation under `docs/**`;
 - crate `README.md` files when directly relevant.
+
+For Rust source files, use line comments only. Do not use block comments or
+`#[doc = ...]` attributes in automated documentation tasks because the workflow
+mechanically verifies that every changed Rust line begins with `//`.
 
 Do not change executable behavior.
 

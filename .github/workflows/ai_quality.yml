@@ -1,7 +1,10 @@
 name: AI Quality
 
+# SECURITY: pull_request_target is intentional because this workflow requires
+# secrets. The job checks out only the trusted base SHA and never executes or
+# checks out pull-request-controlled code in the privileged workspace.
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] trusted base checkout only; PR code is never executed here
     types:
       - labeled
 
@@ -28,6 +31,7 @@ jobs:
     # Claude Code Action additionally checks that the triggering actor has write
     # access to the repository.
     if: >-
+      github.repository == 'FrogbyteEngine/Frogbyte' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       (
         github.event.label.name == 'agent:tests' ||
@@ -69,6 +73,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Capture pull request head before Claude
         id: before
@@ -124,7 +129,9 @@ jobs:
             macros, or any other command derived from pull-request contents.
 
             Existing GitHub CI is responsible for deterministic validation
-            after your changes are pushed.
+            after your changes are pushed. The trusted checkout deliberately
+            does not persist the workflow GITHUB_TOKEN; use the Claude GitHub
+            App credentials managed by this action for branch writes.
 
             Perform exactly ONE task:
 
@@ -141,8 +148,10 @@ jobs:
               You may modify ONLY:
               - `docs/**`;
               - `crates/*/README.md`;
-              - Rust source under `crates/*/src/**/*.rs`, and only for Rustdoc
-                or explanatory comments.
+              - Rust source under `crates/*/src/**/*.rs`, and only for line
+                comments: `//`, `///`, or `//!`.
+              Do not use block comments or `#[doc = ...]` attributes in Rust
+              source during an automated documentation task.
               Executable behavior must not change.
 
             - `agent:benchmarks`:
@@ -193,15 +202,17 @@ jobs:
             --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh pr comment:*)"
             --disallowedTools "Bash(cargo:*),Bash(git commit --no-verify:*),Bash(git push --no-verify:*),Bash(git push --force:*),Bash(git push --force-with-lease:*),Bash(git rebase:*),Bash(git reset:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
 
-      # Claude Code Action can push directly to an open PR branch. Audit the
-      # actual pushed commit range through the GitHub API without checking out
-      # or executing PR-controlled code.
-      - name: Audit generated file scope
+      # Claude Code Action can push directly to an open PR branch. Audit only
+      # commits attributed to claude[bot], so unrelated maintainer commits made
+      # while this job is running are not misclassified as agent changes.
+      #
+      # This audit uses GitHub API metadata only. It never checks out or executes
+      # pull-request-controlled code.
+      - name: Audit generated changes
         id: scope
         if: >-
           always() &&
           steps.command.outputs.active == 'true' &&
-          steps.claude.outcome == 'success' &&
           steps.before.outputs.sha != ''
         shell: bash
         env:
@@ -223,50 +234,142 @@ jobs:
           test -n "$after_sha"
 
           if [[ "$after_sha" == "$BEFORE_SHA" ]]; then
-            echo "No commit was pushed by the AI task."
+            echo "No commit was pushed while the AI task was running."
             exit 0
           fi
 
-          mapfile -t files < <(
-            gh api \
-              "repos/${GITHUB_REPOSITORY}/compare/${BEFORE_SHA}...${after_sha}" \
-              --paginate \
-              --jq '.files[].filename'
+          compare_json="$RUNNER_TEMP/ai-quality-compare.json"
+
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${BEFORE_SHA}...${after_sha}" \
+            > "$compare_json"
+
+          mapfile -t claude_commits < <(
+            python3 - "$compare_json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              data = json.load(handle)
+
+          for commit in data.get("commits", []):
+              author = (commit.get("author") or {}).get("login")
+              committer = (commit.get("committer") or {}).get("login")
+              if author == "claude[bot]" or committer == "claude[bot]":
+                  print(commit["sha"])
+          PY
           )
+
+          if [[ "${#claude_commits[@]}" -eq 0 ]]; then
+            echo "No claude[bot] commit was found in the branch changes."
+            exit 0
+          fi
+
+          if [[ "${#claude_commits[@]}" -gt 1 ]]; then
+            echo "::error::The AI task created more than one Claude commit."
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
           fail=0
 
-          for file in "${files[@]}"; do
-            case "$TASK_LABEL" in
-              agent:tests)
-                if [[ "$file" =~ ^crates/[^/]+/tests/ ]]; then
-                  continue
-                fi
-                ;;
+          for commit_sha in "${claude_commits[@]}"; do
+            commit_json="$RUNNER_TEMP/ai-quality-${commit_sha}.json"
 
-              agent:docs)
-                if [[ "$file" =~ ^docs/ ]] ||
-                   [[ "$file" =~ ^crates/[^/]+/README\.md$ ]] ||
-                   [[ "$file" =~ ^crates/[^/]+/src/.*\.rs$ ]]; then
-                  continue
-                fi
-                ;;
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/commits/${commit_sha}" \
+              > "$commit_json"
 
-              agent:benchmarks)
-                if [[ "$file" =~ ^crates/[^/]+/benches/ ]]; then
-                  continue
-                fi
-                ;;
+            if ! python3 - "$commit_json" "$TASK_LABEL" <<'PY'
+          import json
+          import re
+          import sys
 
-              *)
-                echo "::error::Unknown AI quality task: $TASK_LABEL"
-                fail=1
-                continue
-                ;;
-            esac
+          commit_path, task = sys.argv[1], sys.argv[2]
 
-            echo "::error::$TASK_LABEL pushed an out-of-scope file: $file"
-            fail=1
+          with open(commit_path, encoding="utf-8") as handle:
+              commit = json.load(handle)
+
+          test_path = re.compile(r"^crates/[^/]+/tests/")
+          docs_path = re.compile(r"^docs/")
+          readme_path = re.compile(r"^crates/[^/]+/README\.md$")
+          rust_source_path = re.compile(r"^crates/[^/]+/src/.*\.rs$")
+          bench_path = re.compile(r"^crates/[^/]+/benches/")
+
+          def fail(message: str) -> None:
+              print(f"::error::{message}")
+              raise SystemExit(1)
+
+          def rust_patch_is_comment_only(patch: str | None) -> bool:
+              # Fail closed if GitHub did not provide a textual patch.
+              if patch is None:
+                  return False
+
+              for line in patch.splitlines():
+                  if line.startswith(("+++", "---", "@@")):
+                      continue
+
+                  if not line.startswith(("+", "-")):
+                      continue
+
+                  changed = line[1:].lstrip()
+
+                  # Blank-line-only changes are harmless for documentation.
+                  if not changed:
+                      continue
+
+                  # Keep the mechanical contract intentionally simple:
+                  # Rust source edits made by agent:docs may only add/remove
+                  # line comments. This includes //, /// and //!.
+                  if not changed.startswith("//"):
+                      return False
+
+              return True
+
+          for changed_file in commit.get("files", []):
+              filename = changed_file["filename"]
+
+              if task == "agent:tests":
+                  if not test_path.match(filename):
+                      fail(
+                          "agent:tests changed an out-of-scope file: "
+                          f"{filename}"
+                      )
+
+              elif task == "agent:benchmarks":
+                  if not bench_path.match(filename):
+                      fail(
+                          "agent:benchmarks changed an out-of-scope file: "
+                          f"{filename}"
+                      )
+
+              elif task == "agent:docs":
+                  if docs_path.match(filename) or readme_path.match(filename):
+                      continue
+
+                  if rust_source_path.match(filename):
+                      if not rust_patch_is_comment_only(
+                          changed_file.get("patch")
+                      ):
+                          fail(
+                              "agent:docs changed executable or non-comment "
+                              f"Rust content in: {filename}"
+                          )
+                      continue
+
+                  fail(
+                      "agent:docs changed an out-of-scope file: "
+                      f"{filename}"
+                  )
+
+              else:
+                  fail(f"Unknown AI quality task: {task}")
+
+          print("Claude-generated changes satisfy the task scope.")
+          PY
+            then
+              fail=1
+            fi
           done
 
           if [[ "$fail" -ne 0 ]]; then
