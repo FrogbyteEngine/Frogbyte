@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use crate::entity::entity::Entity;
 
 #[derive(Debug)]
@@ -10,19 +8,19 @@ struct EntitySlot {
 
 pub struct EntityAllocator {
     slots: Vec<EntitySlot>,
-    free: BTreeSet<u32>,
+    free: Vec<u32>,
 }
 
 impl EntityAllocator {
     pub fn new() -> Self {
         Self {
             slots: Vec::new(),
-            free: BTreeSet::new(),
+            free: Vec::new(),
         }
     }
 
     pub fn create(&mut self) -> Entity {
-        if let Some(index) = self.free.pop_last() {
+        if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
             slot.generations += 1;
             slot.is_alive = true;
@@ -43,9 +41,11 @@ impl EntityAllocator {
 
     pub fn remove(&mut self, entity: Entity) -> Result<(), &str> {
         if let Some(slot) = self.slots.get_mut(entity.index() as usize) {
-            self.free.insert(entity.index());
-            slot.is_alive = false;
-            return Ok(());
+            if slot.is_alive && slot.generations == entity.generation() {
+                self.free.push(entity.index());
+                slot.is_alive = false;
+                return Ok(());
+            }
         }
 
         Err("Error: Can't remove an entity that does not exist.")
