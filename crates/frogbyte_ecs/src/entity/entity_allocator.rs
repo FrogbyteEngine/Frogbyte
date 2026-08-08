@@ -45,12 +45,13 @@ impl EntityAllocator {
     }
 
     pub fn remove(&mut self, entity: Entity) -> Result<(), &str> {
-        if let Some(slot) = self.slots.get_mut(entity.index() as usize) {
-            if slot.is_alive && slot.generation == entity.generation() {
-                self.free.push(entity.index());
-                slot.is_alive = false;
-                return Ok(());
-            }
+        if let Some(slot) = self.slots.get_mut(entity.index() as usize)
+            && slot.is_alive
+            && slot.generation == entity.generation()
+        {
+            self.free.push(entity.index());
+            slot.is_alive = false;
+            return Ok(());
         }
 
         Err("Error: Can't remove an entity that does not exist.")
