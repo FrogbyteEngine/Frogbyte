@@ -224,6 +224,7 @@ jobs:
           set -euo pipefail
 
           echo "valid=true" >> "$GITHUB_OUTPUT"
+          echo "pushed=false" >> "$GITHUB_OUTPUT"
 
           after_sha="$(
             gh api \
@@ -266,21 +267,31 @@ jobs:
           fi
 
           if [[ "${#claude_commits[@]}" -gt 1 ]]; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
             echo "::error::The AI task created more than one Claude commit."
             echo "valid=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=${claude_commits[0]}" >> "$GITHUB_OUTPUT"
+
           fail=0
 
           for commit_sha in "${claude_commits[@]}"; do
-            commit_json="$RUNNER_TEMP/ai-quality-${commit_sha}.json"
+            commit_pages="$RUNNER_TEMP/ai-quality-${commit_sha}-pages.json"
 
+            # The Get-a-commit endpoint paginates the changed-file list.
+            # Slurp every response page into one JSON array before auditing.
             gh api \
+              --method GET \
+              --paginate \
+              --slurp \
+              -f per_page=100 \
               "repos/${GITHUB_REPOSITORY}/commits/${commit_sha}" \
-              > "$commit_json"
+              > "$commit_pages"
 
-            if ! python3 - "$commit_json" "$TASK_LABEL" <<'PY'
+            if ! python3 - "$commit_pages" "$TASK_LABEL" <<'PY'
           import json
           import re
           import sys
@@ -288,7 +299,23 @@ jobs:
           commit_path, task = sys.argv[1], sys.argv[2]
 
           with open(commit_path, encoding="utf-8") as handle:
-              commit = json.load(handle)
+              pages = json.load(handle)
+
+          files = [
+              changed_file
+              for page in pages
+              for changed_file in page.get("files", [])
+          ]
+
+          # GitHub documents a maximum of 3,000 changed files for this
+          # paginated endpoint. Fail closed at the limit instead of claiming
+          # that the audit is complete if the API may have truncated the diff.
+          if len(files) >= 3000:
+              print(
+                  "::error::Claude commit reached GitHub's 3,000-file audit "
+                  "limit; refusing to treat the scope audit as complete."
+              )
+              raise SystemExit(1)
 
           test_path = re.compile(r"^crates/[^/]+/tests/")
           docs_path = re.compile(r"^docs/")
@@ -326,7 +353,7 @@ jobs:
 
               return True
 
-          for changed_file in commit.get("files", []):
+          for changed_file in files:
               filename = changed_file["filename"]
 
               if task == "agent:tests":
@@ -411,27 +438,37 @@ jobs:
             echo "reached=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Codex runs asynchronously after the @codex comment is posted. Clear all
-      # currently queued command labels first so older label events become
-      # no-ops when their runs leave the GitHub concurrency queue.
-      - name: Clear queued command labels before Codex fallback
-        if: steps.claude_limit.outputs.reached == 'true'
+      # If Claude already pushed a scoped commit, do not start another writer.
+      # A late quota failure (for example while posting the final report) must
+      # not cause Codex to duplicate or conflict with completed Claude output.
+      - name: Report Claude push completed before quota failure
+        if: >-
+          always() &&
+          steps.claude_limit.outputs.reached == 'true' &&
+          steps.scope.outputs.pushed == 'true' &&
+          steps.scope.outputs.valid == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          TASK_LABEL: ${{ github.event.label.name }}
+          COMMIT_SHA: ${{ steps.scope.outputs.commit_sha }}
         run: |
           set -euo pipefail
 
-          for label in agent:tests agent:docs agent:benchmarks; do
-            gh api \
-              --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/${label}" \
-              >/dev/null 2>&1 || true
-          done
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="Claude reached its included usage limit after already pushing a scoped commit for \`${TASK_LABEL}\` (${COMMIT_SHA}). Codex fallback was intentionally skipped to avoid duplicate or conflicting work. Existing CI remains responsible for validating the pushed commit."
 
+      # Submit the asynchronous Codex handoff before clearing queued labels.
+      # If this step fails, queued labels are preserved and the current command
+      # label remains visible for an explicit retry.
       - name: Trigger Codex fallback
-        if: steps.claude_limit.outputs.reached == 'true'
+        id: codex_fallback
+        if: >-
+          steps.claude_limit.outputs.reached == 'true' &&
+          steps.scope.outputs.pushed != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.CODEX_FALLBACK_PAT }}
@@ -459,9 +496,8 @@ jobs:
 
           Claude could not continue because its included usage limit appears to have been reached.
 
-          Other queued AI quality command labels were cleared before starting
-          this fallback to avoid concurrent writers. They can be applied again
-          after this Codex task has completed.
+          The Codex handoff was submitted before queued agent labels are cleared.
+          Do not apply another agent:* label until this Codex task has completed.
 
           $TASK
 
@@ -480,6 +516,48 @@ jobs:
             --method POST \
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             -f body="$BODY"
+
+          echo "submitted=true" >> "$GITHUB_OUTPUT"
+
+      # Codex runs asynchronously after the @codex comment is accepted. Only
+      # now clear queued command labels so a failed handoff cannot destroy the
+      # pending task queue.
+      - name: Clear queued command labels after Codex handoff
+        if: >-
+          always() &&
+          steps.codex_fallback.outputs.submitted == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          for label in agent:tests agent:docs agent:benchmarks; do
+            gh api \
+              --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/${label}" \
+              >/dev/null 2>&1 || true
+          done
+
+      - name: Report Codex fallback handoff failure
+        if: >-
+          always() &&
+          steps.claude_limit.outputs.reached == 'true' &&
+          steps.scope.outputs.pushed != 'true' &&
+          steps.codex_fallback.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TASK_LABEL: ${{ github.event.label.name }}
+        run: |
+          set -euo pipefail
+
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="Claude reached its included usage limit while processing \`${TASK_LABEL}\`, but the Codex fallback handoff failed. Queued agent labels were preserved and the current command label was left in place. Fix the fallback credential or transient GitHub error, then remove and re-apply the command label to retry."
 
       - name: Report non-quota Claude failure
         if: >-
@@ -515,7 +593,14 @@ jobs:
       # it. Do not remove and re-apply the same label while its current run is
       # still active.
       - name: Remove command label
-        if: always() && steps.command.outputs.active == 'true'
+        if: >-
+          always() &&
+          steps.command.outputs.active == 'true' &&
+          !(
+            steps.claude_limit.outputs.reached == 'true' &&
+            steps.scope.outputs.pushed != 'true' &&
+            steps.codex_fallback.outcome == 'failure'
+          )
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
