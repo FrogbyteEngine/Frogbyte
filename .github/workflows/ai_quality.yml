@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   issues: write
 
 # Only one AI quality run may modify a PR branch at a time.
@@ -63,13 +63,14 @@ jobs:
             echo "active=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # pull_request_target is privileged. Keep only trusted base-branch content
-      # in the workspace root. Never check out or execute the PR head here.
+      # pull_request_target is privileged. github.sha is the current trusted
+      # default-branch commit for this event. Never check out or execute the PR
+      # head in the privileged workspace.
       - name: Check out trusted base branch
         if: steps.command.outputs.active == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -98,7 +99,6 @@ jobs:
       - name: Create AI GitHub App token
         id: ai_app_token
         if: steps.command.outputs.active == 'true'
-        continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.FROGBYTE_AI_APP_CLIENT_ID }}
@@ -113,7 +113,6 @@ jobs:
       - name: Resolve AI GitHub App identity
         id: ai_app
         if: steps.ai_app_token.outcome == 'success'
-        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ steps.ai_app_token.outputs.token }}
