@@ -11,6 +11,12 @@ pub struct EntityAllocator {
     free: Vec<u32>,
 }
 
+impl Default for EntityAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EntityAllocator {
     pub fn new() -> Self {
         Self {
