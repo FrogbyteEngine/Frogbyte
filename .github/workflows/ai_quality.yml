@@ -9,11 +9,9 @@ on:
       - labeled
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+  pull-requests: read
   issues: write
-  actions: read
-  id-token: write
 
 # Only one AI quality run may modify a PR branch at a time.
 # queue: max keeps additional label-triggered runs pending instead of replacing
@@ -94,13 +92,60 @@ jobs:
           test -n "$sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
+      # Use a Frogbyte-owned GitHub App instead of Anthropic's built-in
+      # GitHub App OIDC exchange. The token is scoped to this repository and
+      # revoked automatically by actions/create-github-app-token after the job.
+      - name: Create AI GitHub App token
+        id: ai_app_token
+        if: steps.command.outputs.active == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.FROGBYTE_AI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.FROGBYTE_AI_APP_PRIVATE_KEY }}
+          permission-actions: read
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      # GitHub App installation tokens cannot use the authenticated /user
+      # endpoint. Resolve the bot account explicitly and pass it to Claude.
+      - name: Resolve AI GitHub App identity
+        id: ai_app
+        if: steps.ai_app_token.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.ai_app_token.outputs.token }}
+          APP_SLUG: ${{ steps.ai_app_token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+
+          test -n "$APP_SLUG"
+
+          bot_login="${APP_SLUG}[bot]"
+          bot_id="$(
+            gh api "/users/${bot_login}" --jq '.id'
+          )"
+
+          test -n "$bot_id"
+
+          echo "login=${bot_login}" >> "$GITHUB_OUTPUT"
+          echo "id=${bot_id}" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude quality agent
         id: claude
-        if: steps.command.outputs.active == 'true'
+        if: >-
+          steps.command.outputs.active == 'true' &&
+          steps.ai_app_token.outcome == 'success' &&
+          steps.ai_app.outcome == 'success'
         continue-on-error: true
         uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.ai_app_token.outputs.token }}
+          bot_id: ${{ steps.ai_app.outputs.id }}
+          bot_name: ${{ steps.ai_app.outputs.login }}
 
           additional_permissions: |
             actions: read
@@ -130,8 +175,9 @@ jobs:
 
             Existing GitHub CI is responsible for deterministic validation
             after your changes are pushed. The trusted checkout deliberately
-            does not persist the workflow GITHUB_TOKEN; use the Claude GitHub
-            App credentials managed by this action for branch writes.
+            does not persist the workflow GITHUB_TOKEN; use only the short-lived
+            Frogbyte GitHub App credentials supplied to this action for branch
+            writes.
 
             Perform exactly ONE task:
 
@@ -203,8 +249,9 @@ jobs:
             --disallowedTools "Bash(cargo:*),Bash(git commit --no-verify:*),Bash(git push --no-verify:*),Bash(git push --force:*),Bash(git push --force-with-lease:*),Bash(git rebase:*),Bash(git reset:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
 
       # Claude Code Action can push directly to an open PR branch. Audit only
-      # commits attributed to claude[bot], so unrelated maintainer commits made
-      # while this job is running are not misclassified as agent changes.
+      # commits attributed to the Frogbyte GitHub App bot, so unrelated
+      # maintainer commits made while this job is running are not misclassified
+      # as agent changes.
       #
       # This audit uses GitHub API metadata only. It never checks out or executes
       # pull-request-controlled code.
@@ -213,13 +260,16 @@ jobs:
         if: >-
           always() &&
           steps.command.outputs.active == 'true' &&
-          steps.before.outputs.sha != ''
+          steps.before.outputs.sha != '' &&
+          steps.ai_app_token.outcome == 'success' &&
+          steps.ai_app.outcome == 'success'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BEFORE_SHA: ${{ steps.before.outputs.sha }}
           TASK_LABEL: ${{ github.event.label.name }}
+          AI_BOT_LOGIN: ${{ steps.ai_app.outputs.login }}
         run: |
           set -euo pipefail
 
@@ -246,23 +296,25 @@ jobs:
             > "$compare_json"
 
           mapfile -t claude_commits < <(
-            python3 - "$compare_json" <<'PY'
+            python3 - "$compare_json" "$AI_BOT_LOGIN" <<'PY'
           import json
           import sys
 
-          with open(sys.argv[1], encoding="utf-8") as handle:
+          compare_path, bot_login = sys.argv[1], sys.argv[2]
+
+          with open(compare_path, encoding="utf-8") as handle:
               data = json.load(handle)
 
           for commit in data.get("commits", []):
               author = (commit.get("author") or {}).get("login")
               committer = (commit.get("committer") or {}).get("login")
-              if author == "claude[bot]" or committer == "claude[bot]":
+              if author == bot_login or committer == bot_login:
                   print(commit["sha"])
           PY
           )
 
           if [[ "${#claude_commits[@]}" -eq 0 ]]; then
-            echo "No claude[bot] commit was found in the branch changes."
+            echo "No ${AI_BOT_LOGIN} commit was found in the branch changes."
             exit 0
           fi
 
@@ -406,7 +458,11 @@ jobs:
 
       - name: Detect Claude subscription limit
         id: claude_limit
-        if: always() && steps.command.outputs.active == 'true'
+        if: >-
+          always() &&
+          steps.command.outputs.active == 'true' &&
+          steps.ai_app_token.outcome == 'success' &&
+          steps.ai_app.outcome == 'success'
         shell: bash
         env:
           CLAUDE_STEP_OUTCOME: ${{ steps.claude.outcome }}
@@ -437,6 +493,27 @@ jobs:
             "$EXECUTION_FILE"; then
             echo "reached=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Report AI GitHub authentication failure
+        if: >-
+          always() &&
+          steps.command.outputs.active == 'true' &&
+          (
+            steps.ai_app_token.outcome == 'failure' ||
+            steps.ai_app.outcome == 'failure'
+          )
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TASK_LABEL: ${{ github.event.label.name }}
+        run: |
+          set -euo pipefail
+
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="AI Quality infrastructure authentication failed before Claude could process \`${TASK_LABEL}\`. The Frogbyte GitHub App token or bot identity could not be created. Claude quota fallback was intentionally not triggered. Check the AI Quality workflow run and the GitHub App installation, Client ID, private key, and permissions."
 
       # If Claude already pushed a scoped commit, do not start another writer.
       # A late quota failure (for example while posting the final report) must
@@ -574,7 +651,7 @@ jobs:
           gh api \
             --method POST \
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-            -f body="Claude failed while processing \`${TASK_LABEL}\`, but the failure was not confidently identified as an included-usage quota limit. Codex fallback was intentionally not triggered. Check the AI Quality workflow run."
+            -f body="Claude execution failed while processing \`${TASK_LABEL}\` after GitHub App authentication succeeded, but the failure was not confidently identified as an included-usage quota limit. Codex fallback was intentionally not triggered. Check the AI Quality workflow run."
 
       - name: Report scope violation
         if: always() && steps.scope.outputs.valid == 'false'
@@ -611,6 +688,17 @@ jobs:
             --method DELETE \
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/${TASK_LABEL}" \
             >/dev/null 2>&1 || true
+
+      - name: Fail workflow when AI GitHub authentication failed
+        if: >-
+          always() &&
+          steps.command.outputs.active == 'true' &&
+          (
+            steps.ai_app_token.outcome == 'failure' ||
+            steps.ai_app.outcome == 'failure'
+          )
+        shell: bash
+        run: exit 1
 
       - name: Fail workflow when Claude failed without fallback
         if: >-
