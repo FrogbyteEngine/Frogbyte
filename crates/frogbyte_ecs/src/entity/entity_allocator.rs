@@ -1,41 +1,51 @@
+use std::collections::BTreeSet;
+
+use crate::entity::entity::Entity;
+
 #[derive(Debug)]
-pub struct EntitySlot {
+struct EntitySlot {
     generations: u32,
     is_alive: bool,
 }
 
 pub struct EntityAllocator {
     slots: Vec<EntitySlot>,
-    free: Vec<u32>,
+    free: BTreeSet<u32>,
 }
 
 impl EntityAllocator {
     pub fn new() -> Self {
         Self {
-            slots: Vec::with_capacity(32),
-            free: Vec::new(),
+            slots: Vec::new(),
+            free: BTreeSet::new(),
         }
     }
 
-    pub fn create(&mut self) {
-        if let Some(index) = self.free.pop() {
-            self.slots[index as usize].generations += 1;
-            self.slots[index as usize].is_alive = true;
-        } else {
-            let slot = EntitySlot {
-                generations: 0,
-                is_alive: true,
-            };
+    pub fn create(&mut self) -> Entity {
+        if let Some(index) = self.free.pop_last() {
+            let slot = &mut self.slots[index as usize];
+            slot.generations += 1;
+            slot.is_alive = true;
 
-            self.slots.push(slot);
-        }      
+            return Entity::new(index, slot.generations);
+            
+        }
+
+        let slot = EntitySlot {
+            generations: 0,
+            is_alive: true,
+        };
+
+        self.slots.push(slot);
+        
+        Entity::new(self.slots.len() as u32, 0)
     }
 
-    pub fn remove(&mut self, index: u32) -> Result<&EntitySlot, &str> {
-        if let Some(slot) = self.slots.get_mut(index as usize) {
-            self.free.push(index);
+    pub fn remove(&mut self, entity: Entity) -> Result<(), &str> {
+        if let Some(slot) = self.slots.get_mut(entity.index() as usize) {
+            self.free.insert(entity.index());
             slot.is_alive = false;
-            return Ok(slot);
+            return Ok(());
         }
 
         Err("Error: Can't remove an entity that does not exist.")
