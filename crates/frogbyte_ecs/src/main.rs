@@ -10,6 +10,4 @@ pub fn main() {
     println!("{:?}", entity_allocator.remove(entities[3]));
     entity_allocator.create();
     println!("{:?}", entity_allocator.remove(entities[3]));
-
-
 }
