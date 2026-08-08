@@ -244,8 +244,8 @@ jobs:
 
           claude_args: |
             --max-turns 20
-            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh pr comment:*)"
-            --disallowedTools "Bash(cargo:*),Bash(git commit --no-verify:*),Bash(git push --no-verify:*),Bash(git push --force:*),Bash(git push --force-with-lease:*),Bash(git rebase:*),Bash(git reset:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh pr comment:*)"
+            --disallowedTools "Bash(cargo:*),Bash(git commit --no-verify:*),Bash(git push --no-verify:*),Bash(git push -f:*),Bash(git push --force:*),Bash(git push --force-with-lease:*),Bash(git rebase:*),Bash(git reset:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
 
       # Claude Code Action can push directly to an open PR branch. Audit only
       # commits attributed to the Frogbyte GitHub App bot, so unrelated
@@ -480,16 +480,82 @@ jobs:
             exit 0
           fi
 
-          # Only match messages that specifically describe included usage
-          # exhaustion. Generic rate-limit errors may be transient throttling
-          # and must not automatically consume the Codex fallback.
+          # The execution file is stream JSON and may contain arbitrary PR
+          # content in tool results. Never grep the complete transcript for
+          # quota phrases: old comments or source text can create false
+          # positives. Inspect only top-level rate-limit and final-result events.
           if [[ -z "$EXECUTION_FILE" || ! -f "$EXECUTION_FILE" ]]; then
             exit 0
           fi
 
-          if grep -Eqi \
-            'usage limit|limit reached|5-hour limit|weekly limit|exceed.*usage' \
-            "$EXECUTION_FILE"; then
+          if python3 - "$EXECUTION_FILE" <<'PY'
+          import json
+          import re
+          import sys
+
+          path = sys.argv[1]
+          limit_text = re.compile(
+              r"(?:"
+              r"you(?:'ve| have) hit your limit|"
+              r"out of extra usage|"
+              r"usage limit(?: has been)? reached|"
+              r"5-hour limit|"
+              r"five-hour limit|"
+              r"weekly limit"
+              r")",
+              re.IGNORECASE,
+          )
+
+          reached = False
+
+          with open(path, encoding="utf-8") as handle:
+              for raw_line in handle:
+                  raw_line = raw_line.strip()
+                  if not raw_line:
+                      continue
+
+                  try:
+                      event = json.loads(raw_line)
+                  except json.JSONDecodeError:
+                      continue
+
+                  event_type = event.get("type")
+
+                  if event_type == "rate_limit_event":
+                      info = event.get("rate_limit_info") or {}
+                      if info.get("status") == "rejected":
+                          limit_type = str(info.get("rateLimitType") or "").lower()
+                          if (
+                              "five" in limit_type
+                              or "hour" in limit_type
+                              or "week" in limit_type
+                          ):
+                              reached = True
+                              break
+
+                  if event_type == "assistant" and event.get("error") == "rate_limit":
+                      message = event.get("message") or {}
+                      for item in message.get("content") or []:
+                          if (
+                              isinstance(item, dict)
+                              and item.get("type") == "text"
+                              and limit_text.search(str(item.get("text") or ""))
+                          ):
+                              reached = True
+                              break
+
+                      if reached:
+                          break
+
+                  if event_type == "result" and event.get("is_error") is True:
+                      result = event.get("result")
+                      if isinstance(result, str) and limit_text.search(result):
+                          reached = True
+                          break
+
+          raise SystemExit(0 if reached else 1)
+          PY
+          then
             echo "reached=true" >> "$GITHUB_OUTPUT"
           fi
 
