@@ -170,9 +170,24 @@ jobs:
             If useful changes were made, create at most one focused commit and
             push it only to the current pull request branch.
 
+            After completing the task, post exactly one top-level pull request
+            comment using `gh pr comment`.
+
+            The report must contain:
+
+            - the triggering command;
+            - files added or modified, or `none`;
+            - validation commands executed and their results;
+            - anything intentionally skipped and why.
+
+            If no useful change was justified, report that clearly instead.
+
+            Do not submit a formal pull request review. Do not approve the pull
+            request.
+
           claude_args: |
             --max-turns 20
-            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(cargo:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(cargo:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(gh pr comment:*)"
             --disallowedTools "Bash(git commit --no-verify:*),Bash(git push --no-verify:*),Bash(git push --force:*),Bash(git push --force-with-lease:*),Bash(git rebase:*),Bash(git reset:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
 
       - name: Detect Claude subscription limit
