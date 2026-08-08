@@ -1,7 +1,7 @@
 name: AI Quality
 
 on:
-  pull_request:
+  pull_request_target:
     types:
       - labeled
 
@@ -24,8 +24,9 @@ jobs:
   quality:
     name: ${{ github.event.label.name }}
 
-    # Do not expose repository secrets to fork PRs. Only the three command
-    # labels activate this job.
+    # The privileged workflow is intentionally limited to same-repository PRs.
+    # Claude Code Action additionally checks that the triggering actor has write
+    # access to the repository.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
       (
@@ -60,11 +61,17 @@ jobs:
             echo "active=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Resolve the PR tip when this queued run actually starts. Multiple label
-      # events may have captured the same original head SHA, while an earlier
-      # queued quality task can push a newer commit before this run begins.
-      - name: Resolve current pull request head
-        id: pr_head
+      # pull_request_target is privileged. Keep only trusted base-branch content
+      # in the workspace root. Never check out or execute the PR head here.
+      - name: Check out trusted base branch
+        if: steps.command.outputs.active == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+
+      - name: Capture pull request head before Claude
+        id: before
         if: steps.command.outputs.active == 'true'
         shell: bash
         env:
@@ -81,79 +88,6 @@ jobs:
 
           test -n "$sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      - name: Check out current pull request branch
-        if: steps.command.outputs.active == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.pr_head.outputs.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      # Claude normally commits and pushes its own edits on an open PR. This
-      # pre-commit hook gives us a mechanical path boundary in addition to the
-      # prompt/CLAUDE.md rules.
-      - name: Install task scope guard
-        if: steps.command.outputs.active == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          hooks_dir="$RUNNER_TEMP/frogbyte-ai-hooks"
-          mkdir -p "$hooks_dir"
-
-          cat > "$hooks_dir/pre-commit" <<'HOOK'
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          task="${QUALITY_TASK:?QUALITY_TASK is required}"
-
-          fail() {
-            echo "::error::$1"
-            exit 1
-          }
-
-          mapfile -t files < <(
-            # Disable rename detection so a rename is validated as one deletion
-            # plus one addition. This checks both the source and destination.
-            git diff --cached --name-only --diff-filter=ACMRD --no-renames
-          )
-
-          for file in "${files[@]}"; do
-            case "$task" in
-              agent:tests)
-                if [[ "$file" =~ ^crates/[^/]+/tests/ ]] ||
-                   [[ "$file" =~ ^crates/[^/]+/src/.*\.rs$ ]]; then
-                  continue
-                fi
-                fail "agent:tests attempted to commit an out-of-scope file: $file"
-                ;;
-
-              agent:docs)
-                if [[ "$file" =~ ^docs/ ]] ||
-                   [[ "$file" =~ ^crates/[^/]+/README\.md$ ]] ||
-                   [[ "$file" =~ ^crates/[^/]+/src/.*\.rs$ ]]; then
-                  continue
-                fi
-                fail "agent:docs attempted to commit an out-of-scope file: $file"
-                ;;
-
-              agent:benchmarks)
-                if [[ "$file" =~ ^crates/[^/]+/benches/ ]]; then
-                  continue
-                fi
-                fail "agent:benchmarks attempted to commit outside crates/*/benches/**: $file"
-                ;;
-
-              *)
-                fail "Unknown AI quality task: $task"
-                ;;
-            esac
-          done
-          HOOK
-
-          chmod 0755 "$hooks_dir/pre-commit"
-          git config core.hooksPath "$hooks_dir"
 
       - name: Run Claude quality agent
         id: claude
@@ -173,33 +107,54 @@ jobs:
             Pull request: #${{ github.event.pull_request.number }}
             Triggering label: ${{ github.event.label.name }}
 
-            Read CLAUDE.md before doing anything and obey it strictly.
+            Read the trusted base-branch CLAUDE.md before doing anything and
+            obey it strictly.
 
             Read the pull request description, linked issue, changed files,
             relevant implementation, existing tests, documentation, and
-            benchmarks.
+            benchmarks using the allowed GitHub read-only commands.
+
+            IMPORTANT SECURITY BOUNDARY:
+
+            This workflow contains authentication credentials.
+
+            Never execute pull-request-controlled project code in this job.
+            Do not run Cargo, build scripts, tests, benchmarks, formatters,
+            linters, documentation builds, project scripts, binaries, proc
+            macros, or any other command derived from pull-request contents.
+
+            Existing GitHub CI is responsible for deterministic validation
+            after your changes are pushed.
 
             Perform exactly ONE task:
 
             - `agent:tests`:
-              Generate or improve meaningful tests for behavior introduced or
-              modified by this pull request. Production behavior must not
-              change.
+              Generate or improve meaningful integration tests for behavior
+              introduced or modified by this pull request.
+              You may modify ONLY `crates/*/tests/**`.
+              If useful testing requires editing production source or adding a
+              dependency, make no change and explain why.
 
             - `agent:docs`:
-              Generate or improve meaningful Rustdoc and code/project
-              documentation relevant to this pull request. Executable behavior
-              must not change.
+              Generate or improve meaningful Rustdoc and documentation relevant
+              to this pull request.
+              You may modify ONLY:
+              - `docs/**`;
+              - `crates/*/README.md`;
+              - Rust source under `crates/*/src/**/*.rs`, and only for Rustdoc
+                or explanatory comments.
+              Executable behavior must not change.
 
             - `agent:benchmarks`:
               Generate or improve realistic benchmarks relevant to this pull
-              request. Modify ONLY files under `crates/*/benches/**`.
+              request.
+              You may modify ONLY `crates/*/benches/**`.
               If no suitable benchmark harness already exists, make no code
               changes and report that the task was skipped.
 
             Never approve, submit a formal pull request review, merge, enable
-            auto-merge, mark ready for review, or alter the merge state of
-            this pull request.
+            auto-merge, mark ready for review, or alter the merge state of this
+            pull request.
 
             Never modify `.github/**`, `AGENTS.md`, `CLAUDE.md`, Cargo
             manifests, `Cargo.lock`, or `rust-toolchain.toml`.
@@ -209,9 +164,9 @@ jobs:
             Do not weaken tests, assertions, lint rules, safety checks, or
             validation.
             Do not make unrelated production changes.
-            Never bypass or disable the repository's Git hooks.
 
-            Run the validation required by CLAUDE.md.
+            Before finishing, inspect your complete diff and verify that every
+            changed path belongs to the triggering task.
 
             If useful changes were made, create at most one focused commit and
             push it only to the current pull request branch.
@@ -223,7 +178,9 @@ jobs:
 
             - the triggering command;
             - files added or modified, or `none`;
-            - validation commands executed and their results;
+            - local validation: `not run in privileged AI job`;
+            - CI validation: `pending after push`, or `not applicable` when no
+              files were changed;
             - anything intentionally skipped and why.
 
             If no useful change was justified, report that clearly instead.
@@ -233,8 +190,89 @@ jobs:
 
           claude_args: |
             --max-turns 20
-            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(cargo:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh pr comment:*)"
-            --disallowedTools "Bash(git commit --no-verify:*),Bash(git push --no-verify:*),Bash(git push --force:*),Bash(git push --force-with-lease:*),Bash(git rebase:*),Bash(git reset:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh pr comment:*)"
+            --disallowedTools "Bash(cargo:*),Bash(git commit --no-verify:*),Bash(git push --no-verify:*),Bash(git push --force:*),Bash(git push --force-with-lease:*),Bash(git rebase:*),Bash(git reset:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
+
+      # Claude Code Action can push directly to an open PR branch. Audit the
+      # actual pushed commit range through the GitHub API without checking out
+      # or executing PR-controlled code.
+      - name: Audit generated file scope
+        id: scope
+        if: >-
+          always() &&
+          steps.command.outputs.active == 'true' &&
+          steps.claude.outcome == 'success' &&
+          steps.before.outputs.sha != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BEFORE_SHA: ${{ steps.before.outputs.sha }}
+          TASK_LABEL: ${{ github.event.label.name }}
+        run: |
+          set -euo pipefail
+
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+
+          after_sha="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+              --jq '.head.sha'
+          )"
+
+          test -n "$after_sha"
+
+          if [[ "$after_sha" == "$BEFORE_SHA" ]]; then
+            echo "No commit was pushed by the AI task."
+            exit 0
+          fi
+
+          mapfile -t files < <(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/compare/${BEFORE_SHA}...${after_sha}" \
+              --paginate \
+              --jq '.files[].filename'
+          )
+
+          fail=0
+
+          for file in "${files[@]}"; do
+            case "$TASK_LABEL" in
+              agent:tests)
+                if [[ "$file" =~ ^crates/[^/]+/tests/ ]]; then
+                  continue
+                fi
+                ;;
+
+              agent:docs)
+                if [[ "$file" =~ ^docs/ ]] ||
+                   [[ "$file" =~ ^crates/[^/]+/README\.md$ ]] ||
+                   [[ "$file" =~ ^crates/[^/]+/src/.*\.rs$ ]]; then
+                  continue
+                fi
+                ;;
+
+              agent:benchmarks)
+                if [[ "$file" =~ ^crates/[^/]+/benches/ ]]; then
+                  continue
+                fi
+                ;;
+
+              *)
+                echo "::error::Unknown AI quality task: $TASK_LABEL"
+                fail=1
+                continue
+                ;;
+            esac
+
+            echo "::error::$TASK_LABEL pushed an out-of-scope file: $file"
+            fail=1
+          done
+
+          if [[ "$fail" -ne 0 ]]; then
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
       - name: Detect Claude subscription limit
         id: claude_limit
@@ -257,24 +295,16 @@ jobs:
             exit 0
           fi
 
-          # Be conservative: if the action did not produce an execution file,
-          # do not guess that the failure was a subscription quota failure.
+          # Only match messages that specifically describe included usage
+          # exhaustion. Generic rate-limit errors may be transient throttling
+          # and must not automatically consume the Codex fallback.
           if [[ -z "$EXECUTION_FILE" || ! -f "$EXECUTION_FILE" ]]; then
             exit 0
           fi
 
           if grep -Eqi \
-            'usage limit|limit reached|5-hour limit|weekly limit|rate_limit_error|exceed.*usage|exceed.*rate limit' \
+            'usage limit|limit reached|5-hour limit|weekly limit|exceed.*usage' \
             "$EXECUTION_FILE"; then
-
-            # Service outages / transient overload should not consume the
-            # Codex fallback automatically.
-            if grep -Eqi \
-              'temporarily limiting requests|overloaded|service unavailable' \
-              "$EXECUTION_FILE"; then
-              exit 0
-            fi
-
             echo "reached=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -309,10 +339,10 @@ jobs:
 
           case "$TASK_LABEL" in
             agent:tests)
-              TASK="Generate or improve the meaningful tests for this pull request. Do not change production behavior."
+              TASK="Generate or improve meaningful integration tests for this pull request. Modify only crates/*/tests/**. Do not change production behavior."
               ;;
             agent:docs)
-              TASK="Generate or improve the meaningful Rustdoc and documentation for this pull request. Do not change executable behavior."
+              TASK="Generate or improve meaningful Rustdoc and documentation for this pull request. Do not change executable behavior."
               ;;
             agent:benchmarks)
               TASK="Generate or improve realistic benchmarks for this pull request. Modify only crates/*/benches/**. If no benchmark harness exists, make no code changes and explain why."
@@ -340,8 +370,8 @@ jobs:
           Do not modify CI, GitHub workflows, CLAUDE.md, Cargo manifests,
           Cargo.lock, or rust-toolchain.toml. Do not add dependencies.
 
-          Run the relevant Rust validation. Commit and push only useful quality
-          changes to this PR branch."
+          Run the relevant Rust validation in the Codex environment. Commit and
+          push only useful quality changes to this PR branch."
 
           gh api \
             --method POST \
@@ -365,6 +395,22 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             -f body="Claude failed while processing \`${TASK_LABEL}\`, but the failure was not confidently identified as an included-usage quota limit. Codex fallback was intentionally not triggered. Check the AI Quality workflow run."
 
+      - name: Report scope violation
+        if: always() && steps.scope.outputs.valid == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TASK_LABEL: ${{ github.event.label.name }}
+        run: |
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="The \`${TASK_LABEL}\` AI task pushed at least one file outside its allowed path scope. The AI Quality run failed. Do not merge those generated changes until they are reviewed and corrected."
+
+      # A command label is reusable after the previous invocation has removed
+      # it. Do not remove and re-apply the same label while its current run is
+      # still active.
       - name: Remove command label
         if: always() && steps.command.outputs.active == 'true'
         shell: bash
