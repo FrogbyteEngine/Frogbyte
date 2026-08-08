@@ -16,6 +16,47 @@ Codex may inspect the pull request, repository context, CI results, tests, and
 benchmarks in order to produce review findings and optimization suggestions.
 Human maintainers remain responsible for implementation and merge decisions.
 
+## Explicit quality-generation fallback
+
+The review-only restrictions above apply to normal Codex pull request reviews.
+
+An exception exists only when Codex is explicitly invoked with the marker:
+
+`FROGBYTE_QUALITY_FALLBACK`
+
+In that mode, Codex may perform exactly one quality-generation task named in the fallback request:
+
+- add or improve tests;
+- add or improve benchmarks;
+- add or improve Rustdoc or code documentation.
+
+The fallback must remain within the scope of the triggering pull request.
+
+For test fallback work, Codex may modify integration tests and test-only `#[cfg(test)]` code, but must not change production behavior.
+
+For documentation fallback work, Codex may modify Rustdoc, explanatory source comments, `docs/**`, and directly relevant crate README files, but must not change executable behavior.
+
+For benchmark fallback work, Codex may modify only `crates/*/benches/**`. If no suitable benchmark harness exists, it must make no benchmark changes and explain why.
+
+Even in fallback mode, Codex must never:
+
+- approve a pull request;
+- submit an approving review;
+- merge a pull request;
+- enable auto-merge;
+- change pull request merge state;
+- modify `.github/**`;
+- modify `CLAUDE.md`;
+- modify Cargo manifests or lockfiles;
+- modify `rust-toolchain.toml`;
+- add dependencies;
+- introduce unsafe code;
+- weaken tests, assertions, lints, safety checks, or validation;
+- perform unrelated production changes.
+
+Human maintainers remain solely responsible for approving and merging the pull request.
+
+
 ## Project context
 
 Frogbyte is an experimental Rust game engine maintained by two developers.

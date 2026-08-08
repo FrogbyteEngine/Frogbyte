@@ -1,0 +1,302 @@
+name: AI Quality
+
+on:
+  pull_request:
+    types:
+      - labeled
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+  id-token: write
+
+# Only one AI quality run may modify a PR branch at a time.
+# queue: max keeps additional label-triggered runs pending instead of replacing
+# them, so agent:tests, agent:docs and agent:benchmarks may be applied together.
+concurrency:
+  group: ai-quality-${{ github.event.pull_request.number }}
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: ${{ github.event.label.name }}
+
+    # Do not expose repository secrets to fork PRs. Only the three command
+    # labels activate this job.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        github.event.label.name == 'agent:tests' ||
+        github.event.label.name == 'agent:docs' ||
+        github.event.label.name == 'agent:benchmarks'
+      )
+
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    env:
+      QUALITY_TASK: ${{ github.event.label.name }}
+
+    steps:
+      - name: Check out current pull request branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Claude normally commits and pushes its own edits on an open PR. This
+      # pre-commit hook gives us a mechanical path boundary in addition to the
+      # prompt/CLAUDE.md rules.
+      - name: Install task scope guard
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          hooks_dir="$RUNNER_TEMP/frogbyte-ai-hooks"
+          mkdir -p "$hooks_dir"
+
+          cat > "$hooks_dir/pre-commit" <<'HOOK'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          task="${QUALITY_TASK:?QUALITY_TASK is required}"
+
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
+
+          mapfile -t files < <(
+            git diff --cached --name-only --diff-filter=ACMR
+          )
+
+          for file in "${files[@]}"; do
+            case "$task" in
+              agent:tests)
+                if [[ "$file" =~ ^crates/[^/]+/tests/ ]] ||
+                   [[ "$file" =~ ^crates/[^/]+/src/.*\.rs$ ]]; then
+                  continue
+                fi
+                fail "agent:tests attempted to commit an out-of-scope file: $file"
+                ;;
+
+              agent:docs)
+                if [[ "$file" =~ ^docs/ ]] ||
+                   [[ "$file" =~ ^crates/[^/]+/README\.md$ ]] ||
+                   [[ "$file" =~ ^crates/[^/]+/src/.*\.rs$ ]]; then
+                  continue
+                fi
+                fail "agent:docs attempted to commit an out-of-scope file: $file"
+                ;;
+
+              agent:benchmarks)
+                if [[ "$file" =~ ^crates/[^/]+/benches/ ]]; then
+                  continue
+                fi
+                fail "agent:benchmarks attempted to commit outside crates/*/benches/**: $file"
+                ;;
+
+              *)
+                fail "Unknown AI quality task: $task"
+                ;;
+            esac
+          done
+          HOOK
+
+          chmod 0755 "$hooks_dir/pre-commit"
+          git config core.hooksPath "$hooks_dir"
+
+      - name: Run Claude quality agent
+        id: claude
+        continue-on-error: true
+        uses: anthropics/claude-code-action@6b082c41935b4c8a3b8b0ef85ba4ba4d9eeb8975 # v1.0.189
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          additional_permissions: |
+            actions: read
+
+          prompt: |
+            You are the Frogbyte quality-generation agent.
+
+            Repository: ${{ github.repository }}
+            Pull request: #${{ github.event.pull_request.number }}
+            Triggering label: ${{ github.event.label.name }}
+
+            Read CLAUDE.md before doing anything and obey it strictly.
+
+            Read the pull request description, linked issue, changed files,
+            relevant implementation, existing tests, documentation, and
+            benchmarks.
+
+            Perform exactly ONE task:
+
+            - `agent:tests`:
+              Generate or improve meaningful tests for behavior introduced or
+              modified by this pull request. Production behavior must not
+              change.
+
+            - `agent:docs`:
+              Generate or improve meaningful Rustdoc and code/project
+              documentation relevant to this pull request. Executable behavior
+              must not change.
+
+            - `agent:benchmarks`:
+              Generate or improve realistic benchmarks relevant to this pull
+              request. Modify ONLY files under `crates/*/benches/**`.
+              If no suitable benchmark harness already exists, make no code
+              changes and report that the task was skipped.
+
+            Never approve, submit a formal pull request review, merge, enable
+            auto-merge, mark ready for review, or alter the merge state of
+            this pull request.
+
+            Never modify `.github/**`, `AGENTS.md`, `CLAUDE.md`, Cargo
+            manifests, `Cargo.lock`, or `rust-toolchain.toml`.
+
+            Do not add dependencies.
+            Do not introduce unsafe code.
+            Do not weaken tests, assertions, lint rules, safety checks, or
+            validation.
+            Do not make unrelated production changes.
+            Never bypass or disable the repository's Git hooks.
+
+            Run the validation required by CLAUDE.md.
+
+            If useful changes were made, create at most one focused commit and
+            push it only to the current pull request branch.
+
+          claude_args: |
+            --max-turns 20
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(cargo:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
+            --disallowedTools "Bash(git commit --no-verify:*),Bash(git push --no-verify:*),Bash(git push --force:*),Bash(git push --force-with-lease:*),Bash(git rebase:*),Bash(git reset:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
+
+      - name: Detect Claude subscription limit
+        id: claude_limit
+        if: always()
+        shell: bash
+        env:
+          CLAUDE_STEP_OUTCOME: ${{ steps.claude.outcome }}
+          CLAUDE_CONCLUSION: ${{ steps.claude.outputs.conclusion }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          set -euo pipefail
+
+          echo "reached=false" >> "$GITHUB_OUTPUT"
+          echo "failed=false" >> "$GITHUB_OUTPUT"
+
+          if [[ "$CLAUDE_STEP_OUTCOME" != "success" ||
+                "$CLAUDE_CONCLUSION" == "failure" ]]; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          else
+            exit 0
+          fi
+
+          # Be conservative: if the action did not produce an execution file,
+          # do not guess that the failure was a subscription quota failure.
+          if [[ -z "$EXECUTION_FILE" || ! -f "$EXECUTION_FILE" ]]; then
+            exit 0
+          fi
+
+          if grep -Eqi \
+            'usage limit|limit reached|5-hour limit|weekly limit|rate_limit_error|exceed.*usage|exceed.*rate limit' \
+            "$EXECUTION_FILE"; then
+
+            # Service outages / transient overload should not consume the
+            # Codex fallback automatically.
+            if grep -Eqi \
+              'temporarily limiting requests|overloaded|service unavailable' \
+              "$EXECUTION_FILE"; then
+              exit 0
+            fi
+
+            echo "reached=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger Codex fallback
+        if: steps.claude_limit.outputs.reached == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_FALLBACK_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TASK_LABEL: ${{ github.event.label.name }}
+        run: |
+          set -euo pipefail
+
+          case "$TASK_LABEL" in
+            agent:tests)
+              TASK="Generate or improve the meaningful tests for this pull request. Do not change production behavior."
+              ;;
+            agent:docs)
+              TASK="Generate or improve the meaningful Rustdoc and documentation for this pull request. Do not change executable behavior."
+              ;;
+            agent:benchmarks)
+              TASK="Generate or improve realistic benchmarks for this pull request. Modify only crates/*/benches/**. If no benchmark harness exists, make no code changes and explain why."
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+
+          BODY="@codex FROGBYTE_QUALITY_FALLBACK
+
+          Claude could not continue because its included usage limit appears to have been reached.
+
+          $TASK
+
+          Follow the explicit quality-generation fallback rules in AGENTS.md.
+
+          Never approve, submit an approving review, merge, enable auto-merge,
+          mark ready for review, or change the merge state of this PR.
+
+          Do not modify CI, GitHub workflows, CLAUDE.md, Cargo manifests,
+          Cargo.lock, or rust-toolchain.toml. Do not add dependencies.
+
+          Run the relevant Rust validation. Commit and push only useful quality
+          changes to this PR branch."
+
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="$BODY"
+
+      - name: Report non-quota Claude failure
+        if: >-
+          always() &&
+          steps.claude_limit.outputs.failed == 'true' &&
+          steps.claude_limit.outputs.reached != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TASK_LABEL: ${{ github.event.label.name }}
+        run: |
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="Claude failed while processing \`${TASK_LABEL}\`, but the failure was not confidently identified as an included-usage quota limit. Codex fallback was intentionally not triggered. Check the AI Quality workflow run."
+
+      - name: Remove command label
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TASK_LABEL: ${{ github.event.label.name }}
+        run: |
+          gh api \
+            --method DELETE \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/${TASK_LABEL}" \
+            >/dev/null 2>&1 || true
+
+      - name: Fail workflow when Claude failed without fallback
+        if: >-
+          always() &&
+          steps.claude_limit.outputs.failed == 'true' &&
+          steps.claude_limit.outputs.reached != 'true'
+        shell: bash
+        run: exit 1
