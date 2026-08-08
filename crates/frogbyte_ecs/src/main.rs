@@ -1,4 +1,4 @@
-use frogbyte_ecs::entity::{entity::Entity, entity_allocator::EntityAllocator};
+use frogbyte_ecs::entity::{Entity, entity_allocator::EntityAllocator};
 
 pub fn main() {
     let mut entities: Vec<Entity> = Vec::new();

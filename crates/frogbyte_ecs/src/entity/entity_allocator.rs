@@ -1,4 +1,4 @@
-use crate::entity::entity::Entity;
+use super::Entity;
 
 #[derive(Debug)]
 struct EntitySlot {
