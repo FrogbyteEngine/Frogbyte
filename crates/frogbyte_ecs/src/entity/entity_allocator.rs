@@ -2,7 +2,7 @@ use crate::entity::entity::Entity;
 
 #[derive(Debug)]
 struct EntitySlot {
-    generations: u32,
+    generation: u32,
     is_alive: bool,
 }
 
@@ -22,15 +22,15 @@ impl EntityAllocator {
     pub fn create(&mut self) -> Entity {
         if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
-            slot.generations += 1;
+            slot.generation += 1;
             slot.is_alive = true;
 
-            return Entity::new(index, slot.generations);
+            return Entity::new(index, slot.generation);
             
         }
 
         let slot = EntitySlot {
-            generations: 0,
+            generation: 0,
             is_alive: true,
         };
 
@@ -41,7 +41,7 @@ impl EntityAllocator {
 
     pub fn remove(&mut self, entity: Entity) -> Result<(), &str> {
         if let Some(slot) = self.slots.get_mut(entity.index() as usize) {
-            if slot.is_alive && slot.generations == entity.generation() {
+            if slot.is_alive && slot.generation == entity.generation() {
                 self.free.push(entity.index());
                 slot.is_alive = false;
                 return Ok(());
