@@ -88,4 +88,12 @@ impl EntityAllocator {
 
         Err("Error: Can't remove an entity that does not exist.")
     }
+
+    pub fn is_alive(&self, entity: Entity) -> bool {
+        if let Some(slot) = self.slots.get(entity.index() as usize) {
+            return slot.is_alive;
+        }
+
+        false
+    }
 }

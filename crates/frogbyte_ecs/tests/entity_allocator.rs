@@ -85,7 +85,9 @@ fn removed_index_is_reused_with_an_incremented_generation() {
     let mut allocator = EntityAllocator::new();
     let first = allocator.create();
 
-    allocator.remove(first).expect("first entity should be removed");
+    allocator
+        .remove(first)
+        .expect("first entity should be removed");
 
     let second = allocator.create();
 
@@ -98,7 +100,9 @@ fn stale_handle_is_rejected_after_its_slot_is_reused() {
     let mut allocator = EntityAllocator::new();
     let first = allocator.create();
 
-    allocator.remove(first).expect("first entity should be removed");
+    allocator
+        .remove(first)
+        .expect("first entity should be removed");
 
     let second = allocator.create();
     assert_ne!(first, second, "reused slot must not equal the stale handle");
@@ -133,7 +137,9 @@ fn repeated_create_remove_cycles_keep_incrementing_generation() {
     let mut previous = allocator.create();
 
     for cycle in 1..10 {
-        allocator.remove(previous).expect("entity should still be alive");
+        allocator
+            .remove(previous)
+            .expect("entity should still be alive");
         let next = allocator.create();
 
         assert_eq!(next.index(), previous.index());
