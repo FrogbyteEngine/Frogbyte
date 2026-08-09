@@ -399,6 +399,7 @@ jobs:
         id: publish
         if: >-
           steps.claude.outcome == 'success' &&
+          steps.claude.outputs.conclusion == 'success' &&
           steps.scope.outputs.valid == 'true' &&
           steps.scope.outputs.changed == 'true'
         shell: bash
