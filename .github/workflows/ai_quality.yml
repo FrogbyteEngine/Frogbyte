@@ -43,6 +43,7 @@ jobs:
 
     env:
       QUALITY_TASK: ${{ github.event.label.name }}
+      AI_VALIDATOR_TOOLCHAIN: nightly-2026-07-30
 
     steps:
       - name: Check command label is still active
@@ -75,6 +76,26 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # The docs validator uses rustc only as a parser/pretty-printer. The pinned
+      # compiler exits immediately after parsing for -Zunpretty=normal/ast-tree;
+      # it does not expand macros, load proc macros, link, or execute PR code.
+      - name: Install trusted Rust parser toolchain
+        id: rust_parser
+        if: >-
+          steps.command.outputs.active == 'true' &&
+          github.event.label.name == 'agent:docs'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rustup toolchain install "$AI_VALIDATOR_TOOLCHAIN" --profile minimal
+          rustc_path="$(
+            rustup which --toolchain "$AI_VALIDATOR_TOOLCHAIN" rustc
+          )"
+
+          test -x "$rustc_path"
+          echo "path=$rustc_path" >> "$GITHUB_OUTPUT"
+
       # Freeze the trusted validator before Claude can edit workspace files.
       # The staged copy is hash-checked again before it processes PR data.
       - name: Stage trusted AI quality validator
@@ -88,7 +109,14 @@ jobs:
           staged="$RUNNER_TEMP/ai-quality-validator.py"
 
           install -m 0555 "$source" "$staged"
-          python3 "$staged" --self-test
+
+          if [[ "$QUALITY_TASK" == "agent:docs" ]]; then
+            rustc_path="${{ steps.rust_parser.outputs.path }}"
+            test -n "$rustc_path"
+            python3 "$staged" --self-test --rustc "$rustc_path"
+          else
+            python3 "$staged" --self-test
+          fi
 
           sha="$(sha256sum "$staged" | awk '{print $1}')"
           test -n "$sha"
@@ -275,8 +303,8 @@ jobs:
               dependency, make no change.
 
             - `agent:docs`:
-              Generate or improve meaningful documentation relevant to this
-              pull request. Prefer documentation close to the API it explains.
+              Generate meaningful documentation relevant to this pull request.
+              Prefer documentation close to the API it explains.
               You may modify ONLY:
               - `pr-head/crates/*/src/**/*.rs`, and only Rust files that were
                 already changed by the pull request before this agent run;
@@ -284,12 +312,24 @@ jobs:
                 already touched by the pull request;
               - `pr-head/docs/api/**` for longer API-oriented documentation.
 
-              Rust source edits are documentation-only. Use only line comments:
-              `///`, `//!`, or `//`. Do not use block comments or `#[doc = ...]`
-              attributes. Do not alter Rust program text, string literals,
+              Rust source edits are insert-only. You may ADD whole lines that
+              contain `///`, `//!`, or `//`, but you must not delete, rewrite,
+              reorder, or otherwise modify any existing Rust source line,
+              including existing comments and SAFETY annotations. Do not insert
+              blank lines as part of the Rust source edit. Do not use block
+              comments or `#[doc = ...]` attributes.
+
+              `//!` is limited to crate-root `src/lib.rs` or `src/main.rs`.
+              Rustdoc is intentionally fail-closed in macro-sensitive source.
+              If the relevant file contains macro definitions/invocations, a
+              custom derive, a procedural attribute, `cfg_attr`, or another
+              attribute the trusted validator cannot classify safely, add only
+              useful non-doc `//` explanation comments or use README/docs/api.
+
+              The trusted workflow uses a pinned rustc parser before publishing
+              anything. Never alter Rust program text, strings, block comments,
               attributes, signatures, expressions, imports, or executable
-              behavior. The trusted workflow mechanically verifies this before
-              publishing anything.
+              behavior.
 
               Prioritize public API contracts, invariants, stale-handle and
               ownership semantics, safety requirements, and non-obvious design
@@ -351,6 +391,7 @@ jobs:
           TASK_LABEL: ${{ github.event.label.name }}
           PR_FILES_JSON: ${{ steps.before.outputs.files_json }}
           VALIDATOR_SHA: ${{ steps.validator.outputs.sha }}
+          RUSTC_PATH: ${{ steps.rust_parser.outputs.path }}
         run: |
           set -euo pipefail
 
@@ -365,12 +406,19 @@ jobs:
           printf '%s  %s\n' "$VALIDATOR_SHA" "$validator" |
             sha256sum --check --status
 
-          if ! python3 "$validator" \
-            --task "$TASK_LABEL" \
-            --git-dir "$GIT_DIR" \
-            --worktree "$WORKTREE" \
-            --pr-files-json "$PR_FILES_JSON" \
-            --files-file "$files_file"; then
+          validator_args=(
+            --task "$TASK_LABEL"
+            --git-dir "$GIT_DIR"
+            --worktree "$WORKTREE"
+            --pr-files-json "$PR_FILES_JSON"
+            --files-file "$files_file"
+          )
+
+          if [[ -n "$RUSTC_PATH" ]]; then
+            validator_args+=(--rustc "$RUSTC_PATH")
+          fi
+
+          if ! python3 "$validator" "${validator_args[@]}"; then
             exit 1
           fi
 

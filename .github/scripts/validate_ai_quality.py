@@ -5,163 +5,315 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
 import sys
+import tempfile
+from dataclasses import dataclass
 
 
 CRATE = r"[A-Za-z0-9_-]+"
-RUST_SOURCE = re.compile(rf"^crates/({CRATE})/src(?:/.+)?\.rs$")
+RUST_SOURCE = re.compile(rf"^crates/({CRATE})/src/.+\.rs$")
 CRATE_README = re.compile(rf"^crates/({CRATE})/README\.md$")
 DOCS_API = re.compile(r"^docs/api/.+")
 TEST_PATH = re.compile(r"^crates/[^/]+/tests/")
 BENCH_PATH = re.compile(r"^crates/[^/]+/benches/")
+CRATE_ROOT = re.compile(rf"^crates/({CRATE})/src/(?:lib|main)\.rs$")
+
+MAX_RUST_SOURCE_BYTES = 1_048_576
+MAX_RUST_FILES = 20
+RUSTC_TIMEOUT_SECONDS = 10
+
+BUILTIN_DERIVES = {
+    "Clone",
+    "Copy",
+    "Debug",
+    "Default",
+    "Eq",
+    "Hash",
+    "Ord",
+    "PartialEq",
+    "PartialOrd",
+}
+
+# These built-in attributes do not consume an item's token stream as an
+# attribute procedural macro. cfg_attr is intentionally absent because it can
+# introduce an arbitrary attribute depending on configuration.
+SAFE_ATTRIBUTE_NAMES = {
+    "allow",
+    "cfg",
+    "cold",
+    "deny",
+    "deprecated",
+    "expect",
+    "forbid",
+    "ignore",
+    "inline",
+    "must_use",
+    "no_main",
+    "no_std",
+    "non_exhaustive",
+    "path",
+    "recursion_limit",
+    "repr",
+    "should_panic",
+    "test",
+    "track_caller",
+    "type_length_limit",
+    "warn",
+}
 
 
 class ValidationError(RuntimeError):
     pass
 
 
-def raw_string_end(source: str, start: int) -> int | None:
-    for prefix in ("br", "cr", "r"):
-        if not source.startswith(prefix, start):
-            continue
-
-        cursor = start + len(prefix)
-        hashes = 0
-        while cursor < len(source) and source[cursor] == "#":
-            hashes += 1
-            cursor += 1
-
-        if cursor >= len(source) or source[cursor] != '"':
-            continue
-
-        marker = '"' + ("#" * hashes)
-        end = source.find(marker, cursor + 1)
-        if end < 0:
-            raise ValidationError(
-                f"unterminated raw string at character offset {start}"
-            )
-        return end + len(marker)
-
-    return None
+@dataclass(frozen=True)
+class InsertedLine:
+    index: int
+    text: str
+    kind: str
 
 
-def string_end(source: str, start: int) -> int | None:
-    for prefix in ("b", "c", ""):
-        opener = prefix + '"'
-        if not source.startswith(opener, start):
-            continue
-
-        cursor = start + len(opener)
-        escaped = False
-        while cursor < len(source):
-            char = source[cursor]
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                return cursor + 1
-            cursor += 1
-
-        raise ValidationError(
-            f"unterminated string literal at character offset {start}"
-        )
-
-    return None
+def split_line_ending(line: str) -> tuple[str, str]:
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n"):
+        return line[:-1], "\n"
+    return line, ""
 
 
-def block_comment_end(source: str, start: int) -> int:
-    depth = 1
-    cursor = start + 2
-    while cursor < len(source):
-        if source.startswith("/*", cursor):
-            depth += 1
-            cursor += 2
-            continue
-        if source.startswith("*/", cursor):
-            depth -= 1
-            cursor += 2
-            if depth == 0:
-                return cursor
-            continue
-        cursor += 1
+def classify_inserted_line(line: str) -> str | None:
+    body, _ = split_line_ending(line)
+    stripped = body.lstrip()
 
-    raise ValidationError(
-        f"unterminated block comment at character offset {start}"
-    )
+    if not stripped.startswith("//"):
+        return None
+    if stripped.startswith("//!"):
+        return "inner-doc"
+    if stripped.startswith("///") and not stripped.startswith("////"):
+        return "outer-doc"
+    return "comment"
 
 
-def scan_rust(source: str) -> tuple[str, tuple[str, ...]]:
-    """Return normalized non-comment text and exact block comments.
+def inserted_comment_lines(
+    before: str,
+    after: str,
+    path: str,
+) -> list[InsertedLine]:
+    """Require Rust source changes to be insertions of whole comment lines.
 
-    Rust string, byte-string, raw-string, and C-string literals stay opaque, so
-    comment markers inside literals cannot be mistaken for actual comments.
+    Every pre-existing line must remain byte-for-byte identical and in the same
+    order. This preserves existing SAFETY annotations, block comments, code,
+    attributes, strings, and Rustdoc without having to reimplement Rust lexing.
     """
 
-    program: list[str] = []
-    blocks: list[str] = []
-    pending_space = False
-    cursor = 0
+    before_lines = before.splitlines(keepends=True)
+    after_lines = after.splitlines(keepends=True)
+    insertions: list[InsertedLine] = []
 
-    def flush_space() -> None:
-        nonlocal pending_space
-        if pending_space and program and program[-1] != " ":
-            program.append(" ")
-        pending_space = False
+    before_index = 0
+    after_index = 0
 
-    while cursor < len(source):
-        end = raw_string_end(source, cursor)
-        if end is not None:
-            flush_space()
-            program.append(source[cursor:end])
-            cursor = end
+    while before_index < len(before_lines):
+        if after_index >= len(after_lines):
+            raise ValidationError(
+                f"{path}: existing Rust lines may not be deleted or modified"
+            )
+
+        if before_lines[before_index] == after_lines[after_index]:
+            before_index += 1
+            after_index += 1
             continue
 
-        end = string_end(source, cursor)
-        if end is not None:
-            flush_space()
-            program.append(source[cursor:end])
-            cursor = end
-            continue
+        kind = classify_inserted_line(after_lines[after_index])
+        if kind is None:
+            raise ValidationError(
+                f"{path}: Rust changes may only insert whole //, ///, or //! lines"
+            )
 
-        if source.startswith("//", cursor):
-            end = source.find("\n", cursor + 2)
-            cursor = len(source) if end < 0 else end
-            pending_space = True
-            continue
-
-        if source.startswith("/*", cursor):
-            end = block_comment_end(source, cursor)
-            blocks.append(source[cursor:end])
-            cursor = end
-            pending_space = True
-            continue
-
-        char = source[cursor]
-        if char.isspace():
-            pending_space = True
-        else:
-            flush_space()
-            program.append(char)
-        cursor += 1
-
-    return "".join(program).strip(), tuple(blocks)
-
-
-def validate_comment_only_rust(before: str, after: str, path: str) -> None:
-    before_program, before_blocks = scan_rust(before)
-    after_program, after_blocks = scan_rust(after)
-
-    if before_program != after_program:
-        raise ValidationError(
-            f"{path}: Rust program text changed; only line comments are allowed"
+        insertions.append(
+            InsertedLine(after_index, after_lines[after_index], kind)
         )
-    if before_blocks != after_blocks:
+        after_index += 1
+
+    while after_index < len(after_lines):
+        kind = classify_inserted_line(after_lines[after_index])
+        if kind is None:
+            raise ValidationError(
+                f"{path}: Rust changes may only insert whole //, ///, or //! lines"
+            )
+        insertions.append(
+            InsertedLine(after_index, after_lines[after_index], kind)
+        )
+        after_index += 1
+
+    return insertions
+
+
+def blank_inserted_lines(source: str, insertions: list[InsertedLine]) -> str:
+    lines = source.splitlines(keepends=True)
+
+    for insertion in insertions:
+        body, ending = split_line_ending(lines[insertion.index])
+        lines[insertion.index] = (" " * len(body)) + ending
+
+    return "".join(lines)
+
+
+def rustc_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in (
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTC_BOOTSTRAP",
+        "RUSTC_WRAPPER",
+        "RUSTDOCFLAGS",
+        "RUSTFLAGS",
+    ):
+        env.pop(name, None)
+
+    env["LANG"] = "C"
+    env["LC_ALL"] = "C"
+    env["RUST_BACKTRACE"] = "0"
+    return env
+
+
+def rustc_unpretty(rustc: str, source: str, mode: str, path: str) -> str:
+    if mode not in {"normal", "ast-tree"}:
+        raise ValidationError(f"unsupported rustc unpretty mode: {mode}")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="frogbyte-ai-rust-") as tmp:
+            source_path = pathlib.Path(tmp) / "input.rs"
+            source_path.write_bytes(source.encode("utf-8"))
+
+            command = [
+                rustc,
+                "--crate-name",
+                "frogbyte_ai_quality_probe",
+                "--crate-type=lib",
+                "--edition=2024",
+                "--color=never",
+                f"-Zunpretty={mode}",
+                str(source_path),
+            ]
+
+            result = subprocess.run(
+                command,
+                cwd=tmp,
+                env=rustc_environment(),
+                capture_output=True,
+                text=True,
+                timeout=RUSTC_TIMEOUT_SECONDS,
+                check=False,
+            )
+    except subprocess.TimeoutExpired as error:
         raise ValidationError(
-            f"{path}: block comments changed; use only //, ///, or //! comments"
+            f"{path}: trusted rustc parser timed out after "
+            f"{RUSTC_TIMEOUT_SECONDS} seconds"
+        ) from error
+
+    if result.returncode != 0:
+        diagnostic = result.stderr.strip()
+        if len(diagnostic) > 2_000:
+            diagnostic = diagnostic[-2_000:]
+        raise ValidationError(
+            f"{path}: trusted rustc parser rejected the source: {diagnostic}"
+        )
+
+    return result.stdout
+
+
+def safe_attribute_line(line: str) -> bool:
+    stripped = line.strip()
+    if not (stripped.startswith("#[") or stripped.startswith("#![")):
+        return True
+    if not stripped.endswith("]"):
+        return False
+
+    prefix = "#![" if stripped.startswith("#![") else "#["
+    body = stripped[len(prefix) : -1].strip()
+
+    derive = re.fullmatch(r"derive\s*\(([^()]*)\)", body)
+    if derive is not None:
+        names = [name.strip() for name in derive.group(1).split(",")]
+        return bool(names) and all(
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+            and name in BUILTIN_DERIVES
+            for name in names
+        )
+
+    name = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", body)
+    if name is None:
+        return False
+    return name.group(1) in SAFE_ATTRIBUTE_NAMES
+
+
+def validate_macro_sensitive_rustdoc(
+    after: str,
+    insertions: list[InsertedLine],
+    rustc: str,
+    path: str,
+) -> None:
+    doc_insertions = [
+        insertion
+        for insertion in insertions
+        if insertion.kind in {"outer-doc", "inner-doc"}
+    ]
+    if not doc_insertions:
+        return
+
+    if any(
+        insertion.kind == "inner-doc" for insertion in doc_insertions
+    ) and CRATE_ROOT.fullmatch(path) is None:
+        raise ValidationError(
+            f"{path}: //! insertion is limited to crate root lib.rs or main.rs"
+        )
+
+    for line in after.splitlines():
+        if not safe_attribute_line(line):
+            raise ValidationError(
+                f"{path}: Rustdoc insertion is blocked in files containing "
+                "custom, active, multiline, or unknown attributes"
+            )
+
+    ast_tree = rustc_unpretty(rustc, after, "ast-tree", path)
+    if re.search(r"\b(?:MacCall|MacroDef)\b", ast_tree):
+        raise ValidationError(
+            f"{path}: Rustdoc insertion is blocked in macro-sensitive files"
+        )
+
+
+def validate_insert_only_rust(
+    before: str,
+    after: str,
+    path: str,
+    rustc: str,
+) -> None:
+    if len(before.encode("utf-8")) > MAX_RUST_SOURCE_BYTES:
+        raise ValidationError(f"{path}: Rust source is too large for AI docs")
+    if len(after.encode("utf-8")) > MAX_RUST_SOURCE_BYTES:
+        raise ValidationError(f"{path}: Rust source is too large for AI docs")
+
+    insertions = inserted_comment_lines(before, after, path)
+    if not insertions:
+        return
+
+    validate_macro_sensitive_rustdoc(after, insertions, rustc, path)
+
+    # Parse both versions with the compiler's own parser. Inserted comments are
+    # neutralized in a copy of the generated source. If an apparent comment line
+    # was actually inserted inside a raw string, string literal, block comment,
+    # or other token, the canonical parser output will still differ.
+    sanitized_after = blank_inserted_lines(after, insertions)
+    before_pretty = rustc_unpretty(rustc, before, "normal", path)
+    after_pretty = rustc_unpretty(rustc, sanitized_after, "normal", path)
+
+    if before_pretty != after_pretty:
+        raise ValidationError(
+            f"{path}: trusted Rust parsing found a non-comment syntax change"
         )
 
 
@@ -251,10 +403,19 @@ def validate_docs(
     git_dir: str,
     worktree: str,
     pr_files_json: str,
+    rustc: str | None,
 ) -> None:
     pr_files = parse_pr_files(pr_files_json)
     relevant_crates = touched_crates(pr_files)
     root = pathlib.Path(worktree)
+    rust_paths = [path for path in paths if RUST_SOURCE.fullmatch(path)]
+
+    if len(rust_paths) > MAX_RUST_FILES:
+        raise ValidationError(
+            f"agent:docs may edit at most {MAX_RUST_FILES} Rust files per run"
+        )
+    if rust_paths and not rustc:
+        raise ValidationError("trusted rustc parser path is required for Rust docs")
 
     for path in paths:
         target = root / path
@@ -291,10 +452,11 @@ def validate_docs(
                 f"{path}: Rust source did not exist before the docs task"
             ) from error
 
-        validate_comment_only_rust(
+        validate_insert_only_rust(
             before,
             target.read_text(encoding="utf-8"),
             path,
+            rustc or "",
         )
 
 
@@ -304,6 +466,7 @@ def validate_changes(
     worktree: str,
     pr_files_json: str,
     files_file: str,
+    rustc: str | None,
 ) -> None:
     paths = changed_paths(git_dir, worktree)
     root = pathlib.Path(worktree)
@@ -317,7 +480,7 @@ def validate_changes(
     elif task == "agent:benchmarks":
         invalid = [path for path in paths if not BENCH_PATH.match(path)]
     elif task == "agent:docs":
-        validate_docs(paths, git_dir, worktree, pr_files_json)
+        validate_docs(paths, git_dir, worktree, pr_files_json, rustc)
         invalid = []
     else:
         raise ValidationError(f"unknown AI quality task: {task}")
@@ -332,62 +495,165 @@ def validate_changes(
     )
 
 
-def self_test() -> None:
+def expect_rust_case(
+    name: str,
+    before: str,
+    after: str,
+    path: str,
+    expected: bool,
+    rustc: str,
+) -> None:
+    try:
+        validate_insert_only_rust(before, after, path, rustc)
+        valid = True
+    except ValidationError:
+        valid = False
+
+    if valid != expected:
+        raise ValidationError(
+            f"validator self-test {name!r} expected {expected}, got {valid}"
+        )
+
+
+def self_test(rustc: str | None) -> None:
+    if RUST_SOURCE.fullmatch("crates/example/src/lib.rs") is None:
+        raise ValidationError("validator self-test rejected src/lib.rs")
+    if RUST_SOURCE.fullmatch("crates/example/src/entity/mod.rs") is None:
+        raise ValidationError("validator self-test rejected nested Rust source")
+    if RUST_SOURCE.fullmatch("crates/example/src.rs") is not None:
+        raise ValidationError("validator self-test accepted crates/*/src.rs")
+
+    before = "pub struct A;\n"
+    if len(inserted_comment_lines(before, "// Why.\n" + before, "test.rs")) != 1:
+        raise ValidationError("validator self-test failed comment insertion")
+
+    try:
+        inserted_comment_lines(
+            "// SAFETY[UNSAFE-001]: invariant.\nunsafe { f(); }\n",
+            "unsafe { f(); }\n",
+            "test.rs",
+        )
+    except ValidationError:
+        pass
+    else:
+        raise ValidationError("validator self-test allowed SAFETY deletion")
+
+    if rustc is None:
+        print("AI quality validator core self-tests passed; Rust parser tests skipped.")
+        return
+
     cases = [
-        ("pub struct A;\n", "/// Docs.\npub struct A;\n", True),
-        ("pub mod a;\n", "//! Module docs.\npub mod a;\n", True),
-        ("let x = 1;\n", "// Why.\nlet x = 1;\n", True),
-        ("let x = 1;\n", "let x = 2;\n", False),
-        ("pub struct A;\n", '#[doc = "Docs"]\npub struct A;\n', False),
-        ("pub struct A;\n", "/** Docs. */\npub struct A;\n", False),
-        ("pub struct A;\n", "/* Docs. */\npub struct A;\n", False),
         (
-            'const S: &str = r#"// text /* text */"#;\n',
-            '/// Docs.\nconst S: &str = r#"// text /* text */"#;\n',
+            "outer rustdoc",
+            "pub struct A;\n",
+            "/// Docs.\npub struct A;\n",
+            "crates/example/src/lib.rs",
             True,
         ),
         (
-            'const S: &str = r#"// one"#;\n',
-            'const S: &str = r#"// two"#;\n',
+            "ordinary explanation",
+            "pub fn f() {}\n",
+            "// Kept for an invariant.\npub fn f() {}\n",
+            "crates/example/src/lib.rs",
+            True,
+        ),
+        (
+            "quote char literal",
+            "const QUOTE: char = '\"';\n",
+            "/// Quote.\nconst QUOTE: char = '\"';\n",
+            "crates/example/src/lib.rs",
+            True,
+        ),
+        (
+            "quote byte literal",
+            "const QUOTE: u8 = b'\"';\n",
+            "/// Quote.\nconst QUOTE: u8 = b'\"';\n",
+            "crates/example/src/lib.rs",
+            True,
+        ),
+        (
+            "builtin derive",
+            "#[derive(Copy, Clone, Debug, PartialEq, Eq)]\npub struct A;\n",
+            "/// Docs.\n#[derive(Copy, Clone, Debug, PartialEq, Eq)]\npub struct A;\n",
+            "crates/example/src/lib.rs",
+            True,
+        ),
+        (
+            "custom derive",
+            "#[derive(Custom)]\npub struct A;\n",
+            "/// Docs.\n#[derive(Custom)]\npub struct A;\n",
+            "crates/example/src/lib.rs",
             False,
         ),
         (
-            'const U: &str = "https://example.invalid/a/*b*/";\n',
-            '/// Docs.\nconst U: &str = "https://example.invalid/a/*b*/";\n',
+            "macro input rustdoc",
+            "macro_rules! emit { ($($tt:tt)*) => {}; }\nemit! {\npub struct A;\n}\n",
+            "macro_rules! emit { ($($tt:tt)*) => {}; }\nemit! {\n/// Docs.\npub struct A;\n}\n",
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "raw string disguised comment",
+            'const S: &str = r#"\nvalue\n"#;\n',
+            'const S: &str = r#"\n// not a comment\nvalue\n"#;\n',
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "code edit",
+            "pub fn value() -> u32 { 1 }\n",
+            "pub fn value() -> u32 { 2 }\n",
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "existing comment edit",
+            "// Existing.\npub struct A;\n",
+            "// Rewritten.\npub struct A;\n",
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "block comment move",
+            "/** Existing. */\npub struct A;\n",
+            "pub struct A;\n/** Existing. */\n",
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "doc attribute",
+            "pub struct A;\n",
+            '#[doc = "Docs"]\npub struct A;\n',
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "crate inner rustdoc",
+            "pub mod a;\n",
+            "//! Crate docs.\npub mod a;\n",
+            "crates/example/src/lib.rs",
             True,
         ),
         (
-            "fn id<'a>(x: &'a str) -> &'a str { x }\n",
-            "/// Docs.\nfn id<'a>(x: &'a str) -> &'a str { x }\n",
-            True,
-        ),
-        (
-            "/* a /* nested */ b */\nfn f() {}\n",
-            "/* a /* nested */ b */\n/// Docs.\nfn f() {}\n",
-            True,
-        ),
-        (
-            'const B: &[u8] = br#"//"#;\n',
-            '/// Docs.\nconst B: &[u8] = br#"//"#;\n',
-            True,
-        ),
-        (
-            'const C: &core::ffi::CStr = cr#"/* */"#;\n',
-            '/// Docs.\nconst C: &core::ffi::CStr = cr#"/* */"#;\n',
-            True,
+            "module inner rustdoc",
+            "pub struct A;\n",
+            "//! Module docs.\npub struct A;\n",
+            "crates/example/src/entity.rs",
+            False,
         ),
     ]
 
-    for before, after, expected in cases:
-        try:
-            validate_comment_only_rust(before, after, "test.rs")
-            valid = True
-        except ValidationError:
-            valid = False
-        if valid != expected:
-            raise ValidationError(
-                f"validator self-test expected {expected}, got {valid}"
-            )
+    for name, before_text, after_text, path, expected in cases:
+        expect_rust_case(
+            name,
+            before_text,
+            after_text,
+            path,
+            expected,
+            rustc,
+        )
+
+    print("AI quality validator self-tests passed.")
 
 
 def arguments() -> argparse.Namespace:
@@ -398,6 +664,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--worktree")
     parser.add_argument("--pr-files-json")
     parser.add_argument("--files-file")
+    parser.add_argument("--rustc")
     return parser.parse_args()
 
 
@@ -405,8 +672,7 @@ def main() -> int:
     args = arguments()
     try:
         if args.self_test:
-            self_test()
-            print("AI quality validator self-test passed.")
+            self_test(args.rustc)
             return 0
 
         required = {
@@ -428,6 +694,7 @@ def main() -> int:
             args.worktree,
             args.pr_files_json,
             args.files_file,
+            args.rustc,
         )
         print("Generated changes satisfy the trusted AI quality scope.")
         return 0

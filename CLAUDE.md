@@ -115,18 +115,32 @@ pull request. Prefer documentation close to the API or invariant it explains.
 
 Allowed work:
 
-- Rustdoc line comments (`///` and `//!`) in Rust source files that were already
+- add Rustdoc line comments (`///`) in Rust source files that were already
   changed by the pull request before the agent run;
-- explanatory Rust line comments (`//`) in those same changed Rust source
+- add crate-root inner Rustdoc (`//!`) only in changed `src/lib.rs` or
+  `src/main.rs` files;
+- add explanatory Rust line comments (`//`) in those same changed Rust source
   files, but only for non-obvious invariants or design rationale;
 - API-oriented documentation under `docs/api/**`;
 - directly relevant crate `README.md` files for crates already touched by the
   pull request.
 
-For Rust source files, use line comments only. Do not use block comments or
-`#[doc = ...]` attributes. The trusted workflow compares the Rust program text
-before and after the task and refuses publication unless non-comment program
-text and existing block comments are unchanged.
+Rust source work is intentionally insert-only. Existing Rust lines must remain
+byte-for-byte unchanged and in the same order. Never delete or rewrite an
+existing source line, including an existing comment, Rustdoc line, or
+`SAFETY[...]` annotation. Do not add blank lines as part of the Rust source
+edit. Use only whole-line `//`, `///`, or allowed crate-root `//!` insertions.
+Do not use block comments or `#[doc = ...]` attributes.
+
+Rustdoc is fail-closed in macro-sensitive files. If a relevant Rust file
+contains a macro definition or invocation, a custom derive, a procedural
+attribute, `cfg_attr`, or another attribute the trusted validator cannot
+classify safely, do not add Rustdoc there. Prefer a useful non-doc `//` comment
+when appropriate, or use the crate README / `docs/api/**` instead.
+
+The trusted workflow parses the original and generated source with a pinned
+Rust compiler in parse/pretty-print mode before publication. This does not
+expand macros or execute pull-request code.
 
 Do not modify Rust source files that were not already changed by the pull
 request. Do not change executable behavior.
