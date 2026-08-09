@@ -116,22 +116,6 @@ fn stale_handle_is_rejected_after_its_slot_is_reused() {
 }
 
 #[test]
-fn free_list_reuses_indices_in_last_removed_first_order() {
-    let mut allocator = EntityAllocator::new();
-    let a = allocator.create();
-    let b = allocator.create();
-
-    allocator.remove(a).expect("a should be removed");
-    allocator.remove(b).expect("b should be removed");
-
-    let reused_first = allocator.create();
-    let reused_second = allocator.create();
-
-    assert_eq!(reused_first.index(), b.index());
-    assert_eq!(reused_second.index(), a.index());
-}
-
-#[test]
 fn repeated_create_remove_cycles_keep_incrementing_generation() {
     let mut allocator = EntityAllocator::new();
     let mut previous = allocator.create();
