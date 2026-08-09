@@ -376,7 +376,7 @@ jobs:
             unchanged.
 
           claude_args: |
-            --max-turns 20
+            --max-turns ${{ github.event.label.name == 'agent:docs' && '30' || '20' }}
             --add-dir pr-head
             --allowedTools "Read,Glob,Grep,Edit,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*)"
             --disallowedTools "Bash(git:*),Bash(cargo:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
@@ -549,7 +549,7 @@ jobs:
           echo "pushed=true" >> "$GITHUB_OUTPUT"
           echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Detect Claude subscription limit
+      - name: Classify Claude execution failure
         id: claude_limit
         if: >-
           always() &&
@@ -565,6 +565,7 @@ jobs:
           set -euo pipefail
 
           echo "reached=false" >> "$GITHUB_OUTPUT"
+          echo "max_turns=false" >> "$GITHUB_OUTPUT"
           echo "failed=false" >> "$GITHUB_OUTPUT"
 
           if [[ "$CLAUDE_STEP_OUTCOME" != "success" ||
@@ -577,12 +578,13 @@ jobs:
           # The execution file is stream JSON and may contain arbitrary PR
           # content in tool results. Never grep the complete transcript for
           # quota phrases: old comments or source text can create false
-          # positives. Inspect only top-level rate-limit and final-result events.
+          # positives. Inspect only structured top-level events.
           if [[ -z "$EXECUTION_FILE" || ! -f "$EXECUTION_FILE" ]]; then
             exit 0
           fi
 
-          if python3 - "$EXECUTION_FILE" <<'PY'
+          classification="$(
+            python3 - "$EXECUTION_FILE" <<'PY'
           import json
           import re
           import sys
@@ -601,8 +603,15 @@ jobs:
           )
 
           reached = False
+          max_turns = False
 
-          with open(path, encoding="utf-8") as handle:
+          try:
+              handle = open(path, encoding="utf-8")
+          except OSError:
+              print("other")
+              raise SystemExit(0)
+
+          with handle:
               for raw_line in handle:
                   raw_line = raw_line.strip()
                   if not raw_line:
@@ -610,47 +619,73 @@ jobs:
 
                   try:
                       event = json.loads(raw_line)
-                  except json.JSONDecodeError:
+                  except (json.JSONDecodeError, TypeError):
+                      continue
+
+                  # Claude stream JSON may contain valid JSON values that are not event
+                  # objects. Ignore them instead of assuming `.get`.
+                  if not isinstance(event, dict):
                       continue
 
                   event_type = event.get("type")
 
                   if event_type == "rate_limit_event":
-                      info = event.get("rate_limit_info") or {}
-                      if info.get("status") == "rejected":
+                      info = event.get("rate_limit_info")
+                      if isinstance(info, dict) and info.get("status") == "rejected":
                           limit_type = str(info.get("rateLimitType") or "").lower()
                           normalized = limit_type.replace("-", "_")
-                          if normalized.startswith(
-                              ("five_hour", "seven_day")
-                          ):
+                          if normalized.startswith(("five_hour", "seven_day")):
                               reached = True
                               break
 
                   if event_type == "assistant" and event.get("error") == "rate_limit":
-                      message = event.get("message") or {}
-                      for item in message.get("content") or []:
-                          if (
-                              isinstance(item, dict)
-                              and item.get("type") == "text"
-                              and limit_text.search(str(item.get("text") or ""))
-                          ):
-                              reached = True
-                              break
+                      message = event.get("message")
+                      if isinstance(message, dict):
+                          content = message.get("content")
+                          if isinstance(content, list):
+                              for item in content:
+                                  if (
+                                      isinstance(item, dict)
+                                      and item.get("type") == "text"
+                                      and limit_text.search(str(item.get("text") or ""))
+                                  ):
+                                      reached = True
+                                      break
 
                       if reached:
                           break
 
                   if event_type == "result" and event.get("is_error") is True:
+                      if event.get("subtype") == "error_max_turns":
+                          max_turns = True
+
                       result = event.get("result")
                       if isinstance(result, str) and limit_text.search(result):
                           reached = True
                           break
 
-          raise SystemExit(0 if reached else 1)
+          if reached:
+              print("quota")
+          elif max_turns:
+              print("max_turns")
+          else:
+              print("other")
           PY
-          then
-            echo "reached=true" >> "$GITHUB_OUTPUT"
-          fi
+          )"
+
+          case "$classification" in
+            quota)
+              echo "reached=true" >> "$GITHUB_OUTPUT"
+              ;;
+            max_turns)
+              echo "max_turns=true" >> "$GITHUB_OUTPUT"
+              ;;
+            other)
+              ;;
+            *)
+              echo "::warning::Unknown Claude failure classification: $classification"
+              ;;
+          esac
 
       - name: Report AI GitHub authentication failure
         if: >-
@@ -843,12 +878,33 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             -f body="AI Quality generated valid scoped changes for \`${TASK_LABEL}\`, but the trusted publish step failed. No AI-generated commit was intentionally published. Check the workflow run before retrying."
 
+      - name: Report Claude turn-limit failure
+        if: >-
+          always() &&
+          steps.command.outputs.active == 'true' &&
+          steps.claude_limit.outputs.failed == 'true' &&
+          steps.claude_limit.outputs.max_turns == 'true' &&
+          steps.publish.outputs.pushed != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TASK_LABEL: ${{ github.event.label.name }}
+        run: |
+          set -euo pipefail
+
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f body="Claude reached the configured turn limit while processing \`${TASK_LABEL}\`. No generated changes were published. This was not an included-usage quota event, so Codex fallback was intentionally not triggered. Re-apply the command label after this run completes to retry."
+
       - name: Report non-quota Claude failure
         if: >-
           always() &&
           steps.command.outputs.active == 'true' &&
           steps.claude_limit.outputs.failed == 'true' &&
-          steps.claude_limit.outputs.reached != 'true'
+          steps.claude_limit.outputs.reached != 'true' &&
+          steps.claude_limit.outputs.max_turns != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
