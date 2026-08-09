@@ -148,3 +148,96 @@ fn entities_with_same_index_and_generation_are_equal() {
 
     assert_eq!(a, b);
 }
+
+#[test]
+fn is_alive_is_false_for_an_index_that_was_never_allocated() {
+    let allocator = EntityAllocator::new();
+
+    assert!(!allocator.is_alive(Entity::new(0, 0)));
+}
+
+#[test]
+fn is_alive_is_false_for_an_out_of_range_index() {
+    let mut allocator = EntityAllocator::new();
+    allocator.create();
+
+    assert!(!allocator.is_alive(Entity::new(42, 0)));
+}
+
+#[test]
+fn is_alive_is_true_for_a_freshly_created_entity() {
+    let mut allocator = EntityAllocator::new();
+
+    let entity = allocator.create();
+
+    assert!(allocator.is_alive(entity));
+}
+
+#[test]
+fn is_alive_is_false_after_removal() {
+    let mut allocator = EntityAllocator::new();
+    let entity = allocator.create();
+
+    allocator.remove(entity).expect("entity should be alive");
+
+    assert!(!allocator.is_alive(entity));
+}
+
+#[test]
+fn is_alive_tracks_each_slot_independently() {
+    let mut allocator = EntityAllocator::new();
+    let first = allocator.create();
+    let second = allocator.create();
+    let third = allocator.create();
+
+    allocator
+        .remove(second)
+        .expect("second entity should be alive");
+
+    assert!(allocator.is_alive(first), "untouched slot must stay alive");
+    assert!(
+        !allocator.is_alive(second),
+        "removed slot must not be alive"
+    );
+    assert!(allocator.is_alive(third), "untouched slot must stay alive");
+}
+
+#[test]
+fn is_alive_is_false_for_a_stale_handle_after_its_slot_is_reused() {
+    let mut allocator = EntityAllocator::new();
+    let first = allocator.create();
+
+    allocator
+        .remove(first)
+        .expect("first entity should be removed");
+
+    let second = allocator.create();
+    assert_ne!(first, second, "reused slot must not equal the stale handle");
+
+    // The new occupant is alive, but the stale handle that pointed at the
+    // same index before reuse must not be reported as alive: liveness is a
+    // property of the exact (index, generation) handle, not of the index
+    // alone, matching the generation check `remove` already performs.
+    assert!(allocator.is_alive(second));
+    assert!(
+        !allocator.is_alive(first),
+        "a stale handle must not be reported as alive after its slot is reused"
+    );
+}
+
+#[test]
+fn is_alive_reflects_repeated_create_remove_cycles() {
+    let mut allocator = EntityAllocator::new();
+    let mut previous = allocator.create();
+
+    for _ in 1..10 {
+        assert!(allocator.is_alive(previous));
+
+        allocator
+            .remove(previous)
+            .expect("entity should still be alive");
+        assert!(!allocator.is_alive(previous));
+
+        previous = allocator.create();
+    }
+}
