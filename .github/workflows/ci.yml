@@ -173,6 +173,60 @@ jobs:
           --release
           --locked
 
+  ai-quality-guard:
+    name: AI quality guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show Rust toolchain
+        run: rustc --version --verbose
+
+      - name: Check token guard formatting
+        run: >
+          cargo fmt
+          --manifest-path .github/tools/ai_quality_token_guard/Cargo.toml
+          --
+          --check
+
+      - name: Lint token guard
+        run: >
+          cargo clippy
+          --manifest-path .github/tools/ai_quality_token_guard/Cargo.toml
+          --all-targets
+          --locked
+          --
+          -D warnings
+
+      - name: Test token guard
+        run: >
+          cargo test
+          --manifest-path .github/tools/ai_quality_token_guard/Cargo.toml
+          --locked
+
+      - name: Build token guard
+        run: >
+          cargo build
+          --manifest-path .github/tools/ai_quality_token_guard/Cargo.toml
+          --release
+          --locked
+
+      - name: Test integrated validator
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          token_guard=".github/tools/ai_quality_token_guard/target/release/ai-quality-token-guard"
+          test -x "$token_guard"
+
+          "$token_guard" --self-test
+          python3 .github/scripts/validate_ai_quality.py             --self-test             --token-guard "$token_guard"
+
   required:
     name: CI / Required
     if: always()
@@ -183,6 +237,7 @@ jobs:
       - doctests
       - rustdoc
       - release
+      - ai-quality-guard
     runs-on: ubuntu-24.04
     timeout-minutes: 5
 
@@ -196,6 +251,7 @@ jobs:
           DOCTESTS: ${{ needs.doctests.result }}
           RUSTDOC: ${{ needs.rustdoc.result }}
           RELEASE: ${{ needs.release.result }}
+          AI_QUALITY_GUARD: ${{ needs.ai-quality-guard.result }}
         run: |
           set -euo pipefail
 
@@ -206,6 +262,7 @@ jobs:
             "$DOCTESTS"
             "$RUSTDOC"
             "$RELEASE"
+            "$AI_QUALITY_GUARD"
           )
 
           for result in "${results[@]}"; do

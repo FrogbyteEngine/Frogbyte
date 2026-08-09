@@ -75,6 +75,61 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # Build the token guard only from the trusted base checkout, before the PR
+      # head exists in the workspace. The helper tokenizes Rust source as data;
+      # it never compiles or executes pull-request-controlled project code.
+      - name: Build trusted Rust token guard
+        id: token_guard
+        if: >-
+          steps.command.outputs.active == 'true' &&
+          github.event.label.name == 'agent:docs'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest="$GITHUB_WORKSPACE/.github/tools/ai_quality_token_guard/Cargo.toml"
+          target_dir="$RUNNER_TEMP/ai-quality-token-guard-target"
+          source="$target_dir/release/ai-quality-token-guard"
+          staged="$RUNNER_TEMP/ai-quality-token-guard"
+
+          CARGO_TARGET_DIR="$target_dir" cargo build             --manifest-path "$manifest"             --release             --locked
+
+          install -m 0555 "$source" "$staged"
+          "$staged" --self-test
+
+          sha="$(sha256sum "$staged" | awk '{print $1}')"
+          test -n "$sha"
+
+          echo "path=$staged" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # Freeze the trusted validator before Claude can edit workspace files.
+      # The staged copy is hash-checked again before it processes PR data.
+      - name: Stage trusted AI quality validator
+        id: validator
+        if: steps.command.outputs.active == 'true'
+        shell: bash
+        env:
+          TOKEN_GUARD_PATH: ${{ steps.token_guard.outputs.path }}
+        run: |
+          set -euo pipefail
+
+          source="$GITHUB_WORKSPACE/.github/scripts/validate_ai_quality.py"
+          staged="$RUNNER_TEMP/ai-quality-validator.py"
+
+          install -m 0555 "$source" "$staged"
+
+          if [[ "$QUALITY_TASK" == "agent:docs" ]]; then
+            test -x "$TOKEN_GUARD_PATH"
+            python3 "$staged"               --self-test               --token-guard "$TOKEN_GUARD_PATH"
+          else
+            python3 "$staged" --self-test
+          fi
+
+          sha="$(sha256sum "$staged" | awk '{print $1}')"
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Capture pull request head before Claude
         id: before
         if: steps.command.outputs.active == 'true'
@@ -100,6 +155,31 @@ jobs:
 
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+          files_json='[]'
+
+          if [[ "$QUALITY_TASK" == "agent:docs" ]]; then
+            changed_files="$(jq -r '.changed_files' <<<"$pr_json")"
+
+            if ! [[ "$changed_files" =~ ^[0-9]+$ ]]; then
+              echo "::error::Invalid pull request changed_files value."
+              exit 1
+            fi
+
+            # Keep the trusted relevance snapshot small and fail closed rather
+            # than silently auditing only the first API page.
+            if (( changed_files > 100 )); then
+              echo "::error::agent:docs supports pull requests with at most 100 changed files."
+              exit 1
+            fi
+
+            files_json="$(
+              gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" |
+              jq -c '[.[].filename]'
+            )"
+          fi
+
+          echo "files_json=$files_json" >> "$GITHUB_OUTPUT"
 
       # Keep the untrusted PR snapshot away from the trusted workspace root.
       # It is available to Claude as data only and is never executed here.
@@ -178,6 +258,7 @@ jobs:
         id: claude
         if: >-
           steps.command.outputs.active == 'true' &&
+          steps.validator.outcome == 'success' &&
           steps.ai_app_token.outcome == 'success' &&
           steps.ai_app.outcome == 'success'
         continue-on-error: true
@@ -230,13 +311,44 @@ jobs:
               dependency, make no change.
 
             - `agent:docs`:
-              Generate or improve meaningful documentation relevant to this
-              pull request.
+              Generate meaningful documentation relevant to this pull request.
+              Prefer documentation close to the API it explains.
               You may modify ONLY:
-              - `pr-head/docs/**`;
-              - `pr-head/crates/*/README.md`.
-              Do not modify Rust source in this automated documentation task.
-              Executable behavior must not change.
+              - `pr-head/crates/*/src/**/*.rs`, and only Rust files that were
+                already changed by the pull request before this agent run;
+              - directly relevant `pr-head/crates/*/README.md` files for crates
+                already touched by the pull request;
+              - `pr-head/docs/api/**` for longer API-oriented documentation.
+
+              Rust source edits are insert-only. You may ADD whole lines that
+              contain `///`, `//!`, or `//`, but you must not delete, rewrite,
+              reorder, or otherwise modify any existing Rust source line,
+              including existing comments and SAFETY annotations. Do not insert
+              blank lines as part of the Rust source edit. Do not use block
+              comments or `#[doc = ...]` attributes.
+
+              Use `//!` only when inner/module documentation is structurally
+              appropriate. Do not intentionally change program behavior.
+
+              The trusted workflow proves source and token integrity, not full
+              semantic equivalence. Every pre-existing Rust source line must
+              remain byte-for-byte unchanged and in the same order. A trusted
+              token guard additionally requires all pre-existing Rust tokens to
+              remain unchanged; the only tokenized additions it permits are
+              `doc` attributes produced by inserted `///` or `//!` comments.
+
+              Documentation can still affect observable source locations, and
+              Rustdoc is visible to macros as `doc` attributes. Normal CI and
+              human review therefore remain mandatory before merge.
+
+              Prioritize public API contracts, invariants, stale-handle and
+              ownership semantics, safety requirements, and non-obvious design
+              rationale. Avoid narrating obvious code or documenting incidental
+              implementation details as stable guarantees.
+
+              Never modify governance or engineering policy documentation such
+              as `docs/CI.md`, `docs/CONTRIBUTING.md`, `docs/engineering/**`, or
+              `docs/PROJECT_CHARTER.md`.
 
             - `agent:benchmarks`:
               Generate or improve realistic benchmarks relevant to this pull
@@ -279,6 +391,7 @@ jobs:
           steps.command.outputs.active == 'true' &&
           steps.before.outputs.sha != '' &&
           steps.pr_git.outputs.dir != '' &&
+          steps.validator.outcome == 'success' &&
           steps.ai_app_token.outcome == 'success' &&
           steps.ai_app.outcome == 'success'
         shell: bash
@@ -286,110 +399,45 @@ jobs:
           GIT_DIR: ${{ steps.pr_git.outputs.dir }}
           WORKTREE: ${{ github.workspace }}/pr-head
           TASK_LABEL: ${{ github.event.label.name }}
+          PR_FILES_JSON: ${{ steps.before.outputs.files_json }}
+          VALIDATOR_SHA: ${{ steps.validator.outputs.sha }}
+          TOKEN_GUARD_PATH: ${{ steps.token_guard.outputs.path }}
+          TOKEN_GUARD_SHA: ${{ steps.token_guard.outputs.sha }}
         run: |
           set -euo pipefail
 
-          echo "valid=true" >> "$GITHUB_OUTPUT"
+          echo "valid=false" >> "$GITHUB_OUTPUT"
           echo "changed=false" >> "$GITHUB_OUTPUT"
 
           files_file="$RUNNER_TEMP/ai-quality-files.txt"
+          validator="$RUNNER_TEMP/ai-quality-validator.py"
           : > "$files_file"
 
-          if ! python3 - "$GIT_DIR" "$WORKTREE" "$TASK_LABEL" "$files_file" <<'PY'
-          import pathlib
-          import re
-          import subprocess
-          import sys
+          test -n "$VALIDATOR_SHA"
+          printf '%s  %s\n' "$VALIDATOR_SHA" "$validator" |
+            sha256sum --check --status
 
-          git_dir, worktree, task, files_file = sys.argv[1:5]
-
-          status = subprocess.check_output(
-              [
-                  "git",
-                  f"--git-dir={git_dir}",
-                  f"--work-tree={worktree}",
-                  "-c",
-                  "status.renames=false",
-                  "status",
-                  "--porcelain=v1",
-                  "-z",
-                  "--untracked-files=all",
-              ],
-              stderr=subprocess.STDOUT,
+          validator_args=(
+            --task "$TASK_LABEL"
+            --git-dir "$GIT_DIR"
+            --worktree "$WORKTREE"
+            --pr-files-json "$PR_FILES_JSON"
+            --files-file "$files_file"
           )
 
-          paths: list[str] = []
+          if [[ "$TASK_LABEL" == "agent:docs" ]]; then
+            test -x "$TOKEN_GUARD_PATH"
+            test -n "$TOKEN_GUARD_SHA"
+            printf '%s  %s\n' "$TOKEN_GUARD_SHA" "$TOKEN_GUARD_PATH" |
+              sha256sum --check --status
+            validator_args+=(--token-guard "$TOKEN_GUARD_PATH")
+          fi
 
-          for record in status.split(b"\0"):
-              if not record:
-                  continue
-
-              if len(record) < 4 or record[2:3] != b" ":
-                  print("::error::Unexpected git status record.")
-                  raise SystemExit(1)
-
-              path = record[3:].decode("utf-8", errors="strict")
-              pure = pathlib.PurePosixPath(path)
-
-              if (
-                  not path
-                  or path.startswith("/")
-                  or "\n" in path
-                  or "\r" in path
-                  or pure.is_absolute()
-                  or ".." in pure.parts
-              ):
-                  print(f"::error::Unsafe generated path: {path!r}")
-                  raise SystemExit(1)
-
-              paths.append(path)
-
-          paths = sorted(set(paths))
-
-          if not paths:
-              pathlib.Path(files_file).write_text("", encoding="utf-8")
-              raise SystemExit(0)
-
-          test_path = re.compile(r"^crates/[^/]+/tests/")
-          docs_path = re.compile(r"^docs/")
-          readme_path = re.compile(r"^crates/[^/]+/README\.md$")
-          bench_path = re.compile(r"^crates/[^/]+/benches/")
-
-          def allowed(path: str) -> bool:
-              if task == "agent:tests":
-                  return bool(test_path.match(path))
-
-              if task == "agent:docs":
-                  return bool(
-                      docs_path.match(path)
-                      or readme_path.match(path)
-                  )
-
-              if task == "agent:benchmarks":
-                  return bool(bench_path.match(path))
-
-              return False
-
-          invalid = [path for path in paths if not allowed(path)]
-
-          if invalid:
-              for path in invalid:
-                  print(
-                      f"::error::{task} generated an out-of-scope file: {path}"
-                  )
-              raise SystemExit(1)
-
-          pathlib.Path(files_file).write_text(
-              "".join(f"{path}\n" for path in paths),
-              encoding="utf-8",
-          )
-
-          print("Generated changes satisfy the task path scope.")
-          PY
-          then
-            echo "valid=false" >> "$GITHUB_OUTPUT"
+          if ! python3 "$validator" "${validator_args[@]}"; then
             exit 1
           fi
+
+          echo "valid=true" >> "$GITHUB_OUTPUT"
 
           if [[ -s "$files_file" ]]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -646,7 +694,7 @@ jobs:
               TASK="Generate or improve meaningful integration tests for this pull request. Modify only crates/*/tests/**. Do not change production behavior."
               ;;
             agent:docs)
-              TASK="Generate or improve meaningful Rustdoc and documentation for this pull request. Do not change executable behavior."
+              TASK="Generate or improve meaningful documentation for this pull request. Because the asynchronous fallback is not covered by the trusted Rust comment-only audit, do not modify Rust source. Modify only docs/api/** and directly relevant crates/*/README.md files. Do not change executable behavior."
               ;;
             agent:benchmarks)
               TASK="Generate or improve realistic benchmarks for this pull request. Modify only crates/*/benches/**. If no benchmark harness exists, make no code changes and explain why."
