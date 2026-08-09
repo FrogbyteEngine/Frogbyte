@@ -227,14 +227,27 @@ def rustc_unpretty(rustc: str, source: str, mode: str, path: str) -> str:
 
 
 def safe_attribute_line(line: str) -> bool:
+    """Accept one conservative built-in attribute per physical source line."""
+
     stripped = line.strip()
     if not (stripped.startswith("#[") or stripped.startswith("#![")):
         return True
-    if not stripped.endswith("]"):
+
+    # Fail closed instead of trying to split multiple attributes. A line such
+    # as `#[allow(dead_code)] #[custom]` must not be accepted after validating
+    # only its first attribute. Multiline attributes are rejected as well.
+    attribute_openers = stripped.count("#[") + stripped.count("#![")
+    if attribute_openers != 1 or not stripped.endswith("]"):
         return False
 
     prefix = "#![" if stripped.startswith("#![") else "#["
     body = stripped[len(prefix) : -1].strip()
+
+    # A closing bracket inside the extracted body means the physical line
+    # contains additional bracketed material that this conservative validator
+    # does not attempt to classify.
+    if "]" in body or "#[" in body or "#![" in body:
+        return False
 
     derive = re.fullmatch(r"derive\s*\(([^()]*)\)", body)
     if derive is not None:
@@ -245,44 +258,49 @@ def safe_attribute_line(line: str) -> bool:
             for name in names
         )
 
-    name = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", body)
-    if name is None:
+    attribute = re.fullmatch(
+        r"([A-Za-z_][A-Za-z0-9_]*)(?:\s*(?:\(.*\)|=\s*.+))?",
+        body,
+    )
+    if attribute is None:
         return False
-    return name.group(1) in SAFE_ATTRIBUTE_NAMES
+    return attribute.group(1) in SAFE_ATTRIBUTE_NAMES
 
 
-def validate_macro_sensitive_rustdoc(
+def validate_comment_context(
     after: str,
     insertions: list[InsertedLine],
     rustc: str,
     path: str,
 ) -> None:
-    doc_insertions = [
-        insertion
-        for insertion in insertions
-        if insertion.kind in {"outer-doc", "inner-doc"}
-    ]
-    if not doc_insertions:
-        return
+    """Reject comment insertions in source-location-sensitive contexts."""
 
     if any(
-        insertion.kind == "inner-doc" for insertion in doc_insertions
+        insertion.kind == "inner-doc" for insertion in insertions
     ) and CRATE_ROOT.fullmatch(path) is None:
         raise ValidationError(
             f"{path}: //! insertion is limited to crate root lib.rs or main.rs"
         )
 
+    # Apply the attribute boundary to every comment insertion, not only
+    # Rustdoc. Procedural attributes and custom derives can observe source
+    # spans, so shifting their physical source location is not considered a
+    # documentation-only edit.
     for line in after.splitlines():
         if not safe_attribute_line(line):
             raise ValidationError(
-                f"{path}: Rustdoc insertion is blocked in files containing "
-                "custom, active, multiline, or unknown attributes"
+                f"{path}: comment insertion is blocked in files containing "
+                "custom, active, multiline, multiple, or unknown attributes"
             )
 
+    # Any macro definition or invocation is conservatively treated as
+    # source-location-sensitive. This covers built-ins such as line!()/column!()
+    # and user macros whose expansion may depend on invocation spans. The check
+    # applies to ordinary // comments as well as /// and //! Rustdoc.
     ast_tree = rustc_unpretty(rustc, after, "ast-tree", path)
     if re.search(r"\b(?:MacCall|MacroDef)\b", ast_tree):
         raise ValidationError(
-            f"{path}: Rustdoc insertion is blocked in macro-sensitive files"
+            f"{path}: comment insertion is blocked in macro-sensitive files"
         )
 
 
@@ -301,7 +319,7 @@ def validate_insert_only_rust(
     if not insertions:
         return
 
-    validate_macro_sensitive_rustdoc(after, insertions, rustc, path)
+    validate_comment_context(after, insertions, rustc, path)
 
     # Parse both versions with the compiler's own parser. Inserted comments are
     # neutralized in a copy of the generated source. If an apparent comment line
@@ -589,6 +607,41 @@ def self_test(rustc: str | None) -> None:
             "macro input rustdoc",
             "macro_rules! emit { ($($tt:tt)*) => {}; }\nemit! {\npub struct A;\n}\n",
             "macro_rules! emit { ($($tt:tt)*) => {}; }\nemit! {\n/// Docs.\npub struct A;\n}\n",
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "ordinary comment before location-sensitive macro",
+            "const LINE: u32 = line!();\n",
+            "// Explanation.\nconst LINE: u32 = line!();\n",
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "rustdoc before location-sensitive macro",
+            "const LINE: u32 = line!();\n",
+            "/// Current source line.\nconst LINE: u32 = line!();\n",
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "multiple attributes on one line",
+            "#[allow(dead_code)] #[custom]\npub struct A;\n",
+            "/// Docs.\n#[allow(dead_code)] #[custom]\npub struct A;\n",
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "multiple built-in attributes on one line",
+            "#[allow(dead_code)] #[must_use]\npub struct A;\n",
+            "/// Docs.\n#[allow(dead_code)] #[must_use]\npub struct A;\n",
+            "crates/example/src/lib.rs",
+            False,
+        ),
+        (
+            "ordinary comment with custom attribute",
+            "#[custom]\npub struct A;\n",
+            "// Explanation.\n#[custom]\npub struct A;\n",
             "crates/example/src/lib.rs",
             False,
         ),

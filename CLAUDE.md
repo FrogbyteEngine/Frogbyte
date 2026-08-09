@@ -132,11 +132,13 @@ existing source line, including an existing comment, Rustdoc line, or
 edit. Use only whole-line `//`, `///`, or allowed crate-root `//!` insertions.
 Do not use block comments or `#[doc = ...]` attributes.
 
-Rustdoc is fail-closed in macro-sensitive files. If a relevant Rust file
-contains a macro definition or invocation, a custom derive, a procedural
-attribute, `cfg_attr`, or another attribute the trusted validator cannot
-classify safely, do not add Rustdoc there. Prefer a useful non-doc `//` comment
-when appropriate, or use the crate README / `docs/api/**` instead.
+All Rust comment insertion is fail-closed in macro-sensitive or
+custom-attribute files. Adding even an ordinary `//` line can shift observable
+source locations such as `line!()`. If a relevant Rust file contains any macro
+definition or invocation, custom derive, procedural attribute, `cfg_attr`,
+multiple attributes on one physical line, or another attribute the trusted
+validator cannot classify safely, do not modify that Rust source file. Use the
+crate README or `docs/api/**` instead.
 
 The trusted workflow parses the original and generated source with a pinned
 Rust compiler in parse/pretty-print mode before publication. This does not

@@ -102,6 +102,8 @@ jobs:
         id: validator
         if: steps.command.outputs.active == 'true'
         shell: bash
+        env:
+          RUSTC_PATH: ${{ steps.rust_parser.outputs.path }}
         run: |
           set -euo pipefail
 
@@ -111,7 +113,7 @@ jobs:
           install -m 0555 "$source" "$staged"
 
           if [[ "$QUALITY_TASK" == "agent:docs" ]]; then
-            rustc_path="${{ steps.rust_parser.outputs.path }}"
+            rustc_path="$RUSTC_PATH"
             test -n "$rustc_path"
             python3 "$staged" --self-test --rustc "$rustc_path"
           else
@@ -320,11 +322,14 @@ jobs:
               comments or `#[doc = ...]` attributes.
 
               `//!` is limited to crate-root `src/lib.rs` or `src/main.rs`.
-              Rustdoc is intentionally fail-closed in macro-sensitive source.
-              If the relevant file contains macro definitions/invocations, a
-              custom derive, a procedural attribute, `cfg_attr`, or another
-              attribute the trusted validator cannot classify safely, add only
-              useful non-doc `//` explanation comments or use README/docs/api.
+              All Rust comment insertion is intentionally fail-closed in
+              macro-sensitive or custom-attribute source because adding a
+              physical line can change observable source locations. If the
+              relevant file contains any macro definition/invocation, custom
+              derive, procedural attribute, `cfg_attr`, multiple attributes on
+              one physical line, or another attribute the trusted validator
+              cannot classify safely, do not modify that Rust file. Use the
+              crate README or `docs/api/**` instead.
 
               The trusted workflow uses a pinned rustc parser before publishing
               anything. Never alter Rust program text, strings, block comments,
