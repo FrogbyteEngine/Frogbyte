@@ -59,7 +59,7 @@ In particular, Claude must not run:
 - commands derived from pull request contents.
 
 The existing GitHub CI workflows are the deterministic validation authority
-after generated changes are pushed.
+after generated changes are published.
 
 Claude may inspect repository files, pull request metadata, diffs, linked
 issues, and CI results using explicitly allowed read-only tools.
@@ -111,39 +111,48 @@ Do not add testing, property-testing, fuzzing, or mocking dependencies.
 ## Documentation task
 
 When triggered by `agent:docs`, work only on documentation relevant to the
-pull request.
+pull request. Prefer documentation close to the API or invariant it explains.
 
 Allowed work:
 
-- Rustdoc line comments (`///` and `//!`) on Rust items changed or introduced by
-  the pull request;
-- explanatory Rust line comments (`//`) near changed code;
-- documentation under `docs/**`;
-- crate `README.md` files when directly relevant.
+- Rustdoc line comments (`///` and `//!`) in Rust source files that were already
+  changed by the pull request before the agent run;
+- explanatory Rust line comments (`//`) in those same changed Rust source
+  files, but only for non-obvious invariants or design rationale;
+- API-oriented documentation under `docs/api/**`;
+- directly relevant crate `README.md` files for crates already touched by the
+  pull request.
 
 For Rust source files, use line comments only. Do not use block comments or
-`#[doc = ...]` attributes in automated documentation tasks because the workflow
-mechanically verifies that every changed Rust line begins with `//`.
+`#[doc = ...]` attributes. The trusted workflow compares the Rust program text
+before and after the task and refuses publication unless non-comment program
+text and existing block comments are unchanged.
 
-Do not change executable behavior.
+Do not modify Rust source files that were not already changed by the pull
+request. Do not change executable behavior.
+
+Do not modify governance or engineering policy documentation, including:
+
+- `docs/CI.md`;
+- `docs/CONTRIBUTING.md`;
+- `docs/PROJECT_CHARTER.md`;
+- `docs/engineering/**`.
 
 Prioritize:
 
-- public API contracts;
-- observable behavior;
-- invariants;
-- stale-handle semantics;
-- ownership and lifetime requirements;
-- aliasing constraints;
-- safety requirements;
-- non-obvious algorithmic decisions;
-- reasons behind important implementation choices;
-- useful doctests when the example itself is documentation.
+1. public API contracts and observable behavior;
+2. invariants and invalid-state behavior;
+3. stale-handle and generation semantics;
+4. ownership, lifetime, and aliasing requirements;
+5. safety requirements;
+6. non-obvious algorithmic decisions and design rationale;
+7. useful deterministic doctests when they materially improve API usage docs.
 
 Avoid comments that merely restate obvious code.
 
 Prefer explaining why a constraint exists rather than narrating what a line
-does.
+does. Do not document incidental implementation details as stable guarantees
+unless the existing API or tests intentionally make them part of the contract.
 
 ## Benchmark task
 
@@ -184,9 +193,10 @@ skipped because the required harness is not yet available.
 
 Do not execute project validation commands from the privileged AI quality job.
 
-After Claude pushes generated changes, the existing GitHub CI must perform the
-normal deterministic checks, including formatting, tests, Clippy, documentation
-checks, Miri, and any other workflow applicable to the changed paths.
+After the trusted workflow publishes generated changes, the existing GitHub CI
+must perform the normal deterministic checks, including formatting, tests,
+Clippy, documentation checks, Miri, and any other workflow applicable to the
+changed paths.
 
 Claude's final report must state:
 
@@ -204,8 +214,12 @@ Before finishing:
 2. Verify every edit belongs to the triggering label.
 3. Verify no forbidden file was modified.
 4. Verify `agent:tests` edits are confined to `crates/*/tests/**`.
-5. Verify no executable behavior was changed for documentation.
-6. Verify benchmark edits are confined to `crates/*/benches/**`.
-7. Do not execute pull-request-controlled project code.
-8. Produce at most one focused commit for the task.
-9. Report that deterministic validation is delegated to GitHub CI.
+5. Verify `agent:docs` Rust edits are line-comment-only and confined to Rust
+   files already changed by the pull request.
+6. Verify `agent:docs` prose files are confined to `docs/api/**` or directly
+   relevant crate `README.md` files.
+7. Verify benchmark edits are confined to `crates/*/benches/**`.
+8. Do not execute pull-request-controlled project code.
+9. Do not stage, commit, push, or alter Git history; leave one focused working
+   tree change set for the trusted workflow to audit and publish.
+10. Report that deterministic validation is delegated to GitHub CI.

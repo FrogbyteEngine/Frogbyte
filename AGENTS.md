@@ -29,7 +29,7 @@ the fallback request:
 
 - add or improve integration tests;
 - add or improve benchmarks;
-- add or improve Rustdoc or code documentation.
+- add or improve documentation.
 
 The fallback must remain within the scope of the triggering pull request.
 
@@ -41,15 +41,18 @@ It must not modify production source files. If the required behavior cannot be
 tested without changing production code or adding a dependency, it must make no
 test change and explain why.
 
-For documentation fallback work, Codex may modify:
+For documentation fallback work, Codex may modify only:
 
-- `docs/**`;
-- directly relevant `crates/*/README.md` files;
-- Rust source under `crates/*/src/**/*.rs`, but only line comments beginning
-  with `//`, including Rustdoc `///` and `//!`.
+- `docs/api/**`;
+- directly relevant `crates/*/README.md` files.
 
-It must not use block comments or `#[doc = ...]` attributes during automated
-documentation fallback work, and it must not change executable behavior.
+The asynchronous Codex fallback is not covered by the trusted Rust
+comment-only validator used by the primary Claude workflow. It must therefore
+not modify Rust source during documentation fallback work.
+
+It must not modify governance or engineering policy documentation, including
+`docs/CI.md`, `docs/CONTRIBUTING.md`, `docs/PROJECT_CHARTER.md`, or
+`docs/engineering/**`.
 
 For benchmark fallback work, Codex may modify only:
 
