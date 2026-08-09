@@ -408,18 +408,34 @@ jobs:
             your generated files and, if valid, create exactly one commit on
             the current pull request branch.
 
+            Your final structured output must contain a `commit_description`
+            field describing only the useful in-scope changes you actually made.
+
+            The commit description must:
+            - be written in English;
+            - use concise imperative wording;
+            - not include a Conventional Commit type or scope;
+            - not mention Claude, AI, the agent, the pull request, or PR coverage;
+            - contain exactly one line;
+            - keep the complete commit subject within 72 characters after the workflow 
+              adds its deterministic Conventional Commit type;
+              contain at most 66 characters for `agent:tests` and `agent:docs`;
+              contain at most 61 characters for `agent:benchmarks`;
+            - not start or end with whitespace;
+            - not end with a period.
+
             If no useful in-scope change is justified, leave `pr-head/`
-            unchanged.
+            unchanged and set `commit_description` to
+            `no useful in-scope changes`.
 
           claude_args: |
             --max-turns ${{ github.event.label.name == 'agent:docs' && '30' || '20' }}
             ${{ github.event.label.name == 'agent:benchmarks' && '--model opus' || '' }}
             ${{ github.event.label.name == 'agent:benchmarks' && '--effort xhigh' || '' }}
             ${{ github.event.label.name == 'agent:benchmarks' && '--fallback-model sonnet' || '' }}
-            --add-dir pr-head
+            --json-schema '{"type":"object","properties":{"commit_description":{"type":"string","description":"One-line English imperative summary of the useful in-scope changes, without a Conventional Commit type or scope. Keep the complete commit subject within 72 characters after the workflow adds its deterministic type: the description may use at most 66 characters for agent:tests and agent:docs, and 61 characters for agent:benchmarks. Do not mention Claude, AI, the agent, the pull request, or PR coverage."}},"required":["commit_description"],"additionalProperties":false}'            --add-dir pr-head
             --allowedTools "Read,Glob,Grep,Edit,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*)"
             --disallowedTools "Bash(git:*),Bash(cargo:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
-
 
       # Claude never owns Git write operations. Audit the untrusted working tree
       # first, then let a trusted workflow step publish one fast-forward commit.
@@ -500,6 +516,7 @@ jobs:
           BOT_LOGIN: ${{ steps.ai_app.outputs.login }}
           BOT_ID: ${{ steps.ai_app.outputs.id }}
           TASK_LABEL: ${{ github.event.label.name }}
+          CLAUDE_OUTPUT: ${{ steps.claude.outputs.structured_output }}
         run: |
           set -euo pipefail
 
@@ -536,19 +553,77 @@ jobs:
 
           case "$TASK_LABEL" in
             agent:tests)
-              commit_message="test: add AI-generated PR coverage"
+              commit_type="test"
+              fallback_description="update generated tests"
               ;;
             agent:docs)
-              commit_message="docs: add AI-generated PR documentation"
+              commit_type="docs"
+              fallback_description="update generated documentation"
               ;;
             agent:benchmarks)
-              commit_message="benchmark: add AI-generated PR coverage"
+              commit_type="benchmark"
+              fallback_description="update generated benchmarks"
               ;;
             *)
               echo "::error::Unknown AI quality task: $TASK_LABEL"
               exit 1
               ;;
           esac
+
+          commit_description=""
+
+          if jq -e \
+            'type == "object" and (.commit_description | type == "string")' \
+            <<<"$CLAUDE_OUTPUT" >/dev/null 2>&1; then
+            commit_description="$(
+              jq -r '.commit_description' <<<"$CLAUDE_OUTPUT"
+            )"
+          fi
+
+          valid_description=true
+          max_description_length=$((72 - ${#commit_type} - 2))
+
+          if [[ -z "$commit_description" ||
+                "$commit_description" == *$'\n'* ||
+                "$commit_description" == *$'\r'* ]]; then
+            valid_description=false
+          fi
+
+          if (( ${#commit_description} > max_description_length )); then
+            valid_description=false
+          fi
+
+          if [[ "$commit_description" =~ ^[[:space:]] ||
+                "$commit_description" =~ [[:space:]]$ ||
+                "$commit_description" == *. ||
+                "$commit_description" == *": "* ||
+                "$commit_description" == "no useful in-scope changes" ]]; then
+            valid_description=false
+          fi
+
+          if printf '%s' "$commit_description" |
+            LC_ALL=C grep -q '[[:cntrl:]]'; then
+            valid_description=false
+          fi
+
+          normalized_description="${commit_description,,}"
+          if [[ "$normalized_description" =~ (^|[^[:alnum:]])(claude|ai|agent|pr)([^[:alnum:]]|$) ]] ||
+             [[ "$normalized_description" == *"pull request"* ]] ||
+             [[ "$normalized_description" == *"pr coverage"* ]]; then
+            valid_description=false
+          fi
+
+          if [[ "$valid_description" != "true" ]]; then
+            echo "::warning::Invalid AI commit description; using fallback."
+            commit_description="$fallback_description"
+          fi
+
+          commit_message="${commit_type}: ${commit_description}"
+
+          if (( ${#commit_message} > 72 )); then
+            echo "::error::Commit message exceeds 72 characters."
+            exit 1
+          fi
 
           export GIT_CONFIG_NOSYSTEM=1
           export GIT_CONFIG_GLOBAL=/dev/null
