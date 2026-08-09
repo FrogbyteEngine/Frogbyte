@@ -117,8 +117,8 @@ Allowed work:
 
 - add Rustdoc line comments (`///`) in Rust source files that were already
   changed by the pull request before the agent run;
-- add crate-root inner Rustdoc (`//!`) only in changed `src/lib.rs` or
-  `src/main.rs` files;
+- add inner/module Rustdoc (`//!`) in changed Rust source files when
+  structurally appropriate;
 - add explanatory Rust line comments (`//`) in those same changed Rust source
   files, but only for non-obvious invariants or design rationale;
 - API-oriented documentation under `docs/api/**`;
@@ -129,7 +129,7 @@ Rust source work is intentionally insert-only. Existing Rust lines must remain
 byte-for-byte unchanged and in the same order. Never delete or rewrite an
 existing source line, including an existing comment, Rustdoc line, or
 `SAFETY[...]` annotation. Do not add blank lines as part of the Rust source
-edit. Use only whole-line `//`, `///`, or allowed crate-root `//!` insertions.
+edit. Use only whole-line `//`, `///`, or structurally appropriate `//!` insertions.
 Do not use block comments or `#[doc = ...]` attributes.
 
 Do not intentionally change program behavior.
