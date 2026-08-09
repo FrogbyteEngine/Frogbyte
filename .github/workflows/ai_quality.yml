@@ -360,7 +360,7 @@ jobs:
               as `docs/CI.md`, `docs/CONTRIBUTING.md`, `docs/engineering/**`, or
               `docs/PROJECT_CHARTER.md`.
 
-              - `agent:benchmarks`:
+            - `agent:benchmarks`:
               Generate, maintain, or improve realistic benchmarks relevant to
               this pull request.
 
