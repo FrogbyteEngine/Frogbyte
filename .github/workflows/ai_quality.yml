@@ -417,7 +417,10 @@ jobs:
             - not include a Conventional Commit type or scope;
             - not mention Claude, AI, the agent, the pull request, or PR coverage;
             - contain exactly one line;
-            - contain at most 61 characters;
+            - keep the complete commit subject within 72 characters after the workflow 
+              adds its deterministic Conventional Commit type;
+              contain at most 66 characters for `agent:tests` and `agent:docs`;
+              contain at most 61 characters for `agent:benchmarks`;
             - not start or end with whitespace;
             - not end with a period.
 
@@ -430,8 +433,7 @@ jobs:
             ${{ github.event.label.name == 'agent:benchmarks' && '--model opus' || '' }}
             ${{ github.event.label.name == 'agent:benchmarks' && '--effort xhigh' || '' }}
             ${{ github.event.label.name == 'agent:benchmarks' && '--fallback-model sonnet' || '' }}
-            --json-schema '{"type":"object","properties":{"commit_description":{"type":"string","description":"One-line English imperative summary of the useful in-scope changes, without a Conventional Commit type or scope. Keep it at most 61 characters and do not mention Claude, AI, the agent, the pull request, or PR coverage."}},"required":["commit_description"],"additionalProperties":false}'
-            --add-dir pr-head
+            --json-schema '{"type":"object","properties":{"commit_description":{"type":"string","description":"One-line English imperative summary of the useful in-scope changes, without a Conventional Commit type or scope. Keep the complete commit subject within 72 characters after the workflow adds its deterministic type: the description may use at most 66 characters for agent:tests and agent:docs, and 61 characters for agent:benchmarks. Do not mention Claude, AI, the agent, the pull request, or PR coverage."}},"required":["commit_description"],"additionalProperties":false}'            --add-dir pr-head
             --allowedTools "Read,Glob,Grep,Edit,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*)"
             --disallowedTools "Bash(git:*),Bash(cargo:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
 
