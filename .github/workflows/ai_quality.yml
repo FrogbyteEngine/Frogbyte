@@ -43,7 +43,6 @@ jobs:
 
     env:
       QUALITY_TASK: ${{ github.event.label.name }}
-      AI_VALIDATOR_TOOLCHAIN: nightly-2026-07-30
 
     steps:
       - name: Check command label is still active
@@ -76,11 +75,11 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      # The docs validator uses rustc only as a parser/pretty-printer. The pinned
-      # compiler exits immediately after parsing for -Zunpretty=normal/ast-tree;
-      # it does not expand macros, load proc macros, link, or execute PR code.
-      - name: Install trusted Rust parser toolchain
-        id: rust_parser
+      # Build the token guard only from the trusted base checkout, before the PR
+      # head exists in the workspace. The helper tokenizes Rust source as data;
+      # it never compiles or executes pull-request-controlled project code.
+      - name: Build trusted Rust token guard
+        id: token_guard
         if: >-
           steps.command.outputs.active == 'true' &&
           github.event.label.name == 'agent:docs'
@@ -88,13 +87,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          rustup toolchain install "$AI_VALIDATOR_TOOLCHAIN" --profile minimal
-          rustc_path="$(
-            rustup which --toolchain "$AI_VALIDATOR_TOOLCHAIN" rustc
-          )"
+          manifest="$GITHUB_WORKSPACE/.github/tools/ai_quality_token_guard/Cargo.toml"
+          target_dir="$RUNNER_TEMP/ai-quality-token-guard-target"
+          source="$target_dir/release/ai-quality-token-guard"
+          staged="$RUNNER_TEMP/ai-quality-token-guard"
 
-          test -x "$rustc_path"
-          echo "path=$rustc_path" >> "$GITHUB_OUTPUT"
+          CARGO_TARGET_DIR="$target_dir" cargo build             --manifest-path "$manifest"             --release             --locked
+
+          install -m 0555 "$source" "$staged"
+          "$staged" --self-test
+
+          sha="$(sha256sum "$staged" | awk '{print $1}')"
+          test -n "$sha"
+
+          echo "path=$staged" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       # Freeze the trusted validator before Claude can edit workspace files.
       # The staged copy is hash-checked again before it processes PR data.
@@ -103,7 +110,7 @@ jobs:
         if: steps.command.outputs.active == 'true'
         shell: bash
         env:
-          RUSTC_PATH: ${{ steps.rust_parser.outputs.path }}
+          TOKEN_GUARD_PATH: ${{ steps.token_guard.outputs.path }}
         run: |
           set -euo pipefail
 
@@ -113,9 +120,8 @@ jobs:
           install -m 0555 "$source" "$staged"
 
           if [[ "$QUALITY_TASK" == "agent:docs" ]]; then
-            rustc_path="$RUSTC_PATH"
-            test -n "$rustc_path"
-            python3 "$staged" --self-test --rustc "$rustc_path"
+            test -x "$TOKEN_GUARD_PATH"
+            python3 "$staged"               --self-test               --token-guard "$TOKEN_GUARD_PATH"
           else
             python3 "$staged" --self-test
           fi
@@ -321,20 +327,19 @@ jobs:
               blank lines as part of the Rust source edit. Do not use block
               comments or `#[doc = ...]` attributes.
 
-              `//!` is limited to crate-root `src/lib.rs` or `src/main.rs`.
-              All Rust comment insertion is intentionally fail-closed in
-              macro-sensitive or custom-attribute source because adding a
-              physical line can change observable source locations. If the
-              relevant file contains any macro definition/invocation, custom
-              derive, procedural attribute, `cfg_attr`, multiple attributes on
-              one physical line, or another attribute the trusted validator
-              cannot classify safely, do not modify that Rust file. Use the
-              crate README or `docs/api/**` instead.
+              Use `//!` only when inner/module documentation is structurally
+              appropriate. Do not intentionally change program behavior.
 
-              The trusted workflow uses a pinned rustc parser before publishing
-              anything. Never alter Rust program text, strings, block comments,
-              attributes, signatures, expressions, imports, or executable
-              behavior.
+              The trusted workflow proves source and token integrity, not full
+              semantic equivalence. Every pre-existing Rust source line must
+              remain byte-for-byte unchanged and in the same order. A trusted
+              token guard additionally requires all pre-existing Rust tokens to
+              remain unchanged; the only tokenized additions it permits are
+              `doc` attributes produced by inserted `///` or `//!` comments.
+
+              Documentation can still affect observable source locations, and
+              Rustdoc is visible to macros as `doc` attributes. Normal CI and
+              human review therefore remain mandatory before merge.
 
               Prioritize public API contracts, invariants, stale-handle and
               ownership semantics, safety requirements, and non-obvious design
@@ -396,7 +401,8 @@ jobs:
           TASK_LABEL: ${{ github.event.label.name }}
           PR_FILES_JSON: ${{ steps.before.outputs.files_json }}
           VALIDATOR_SHA: ${{ steps.validator.outputs.sha }}
-          RUSTC_PATH: ${{ steps.rust_parser.outputs.path }}
+          TOKEN_GUARD_PATH: ${{ steps.token_guard.outputs.path }}
+          TOKEN_GUARD_SHA: ${{ steps.token_guard.outputs.sha }}
         run: |
           set -euo pipefail
 
@@ -419,8 +425,12 @@ jobs:
             --files-file "$files_file"
           )
 
-          if [[ -n "$RUSTC_PATH" ]]; then
-            validator_args+=(--rustc "$RUSTC_PATH")
+          if [[ "$TASK_LABEL" == "agent:docs" ]]; then
+            test -x "$TOKEN_GUARD_PATH"
+            test -n "$TOKEN_GUARD_SHA"
+            printf '%s  %s\n' "$TOKEN_GUARD_SHA" "$TOKEN_GUARD_PATH" |
+              sha256sum --check --status
+            validator_args+=(--token-guard "$TOKEN_GUARD_PATH")
           fi
 
           if ! python3 "$validator" "${validator_args[@]}"; then

@@ -1,0 +1,14 @@
+[package]
+name = "ai-quality-token-guard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+
+[dependencies]
+proc-macro2 = { version = "=1.0.107", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[workspace]

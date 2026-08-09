@@ -132,20 +132,22 @@ existing source line, including an existing comment, Rustdoc line, or
 edit. Use only whole-line `//`, `///`, or allowed crate-root `//!` insertions.
 Do not use block comments or `#[doc = ...]` attributes.
 
-All Rust comment insertion is fail-closed in macro-sensitive or
-custom-attribute files. Adding even an ordinary `//` line can shift observable
-source locations such as `line!()`. If a relevant Rust file contains any macro
-definition or invocation, custom derive, procedural attribute, `cfg_attr`,
-multiple attributes on one physical line, or another attribute the trusted
-validator cannot classify safely, do not modify that Rust source file. Use the
-crate README or `docs/api/**` instead.
+Do not intentionally change program behavior.
 
-The trusted workflow parses the original and generated source with a pinned
-Rust compiler in parse/pretty-print mode before publication. This does not
-expand macros or execute pull-request code.
+The trusted workflow proves source and token integrity, not full semantic
+equivalence. Every pre-existing Rust source line must remain byte-for-byte
+unchanged and in the same order. A trusted token guard requires every
+pre-existing Rust token to remain unchanged; the only tokenized additions it
+permits are `doc` attributes produced by newly inserted `///` or `//!` lines.
+
+Ordinary non-doc comments are Rust whitespace. Rustdoc comments become `doc`
+attributes, and adding physical source lines can change observable source
+locations such as panic locations, `line!()`, or `Location::caller()`. These
+effects are intentionally outside the mechanical guarantee. Normal CI and
+human maintainer review remain mandatory before merge.
 
 Do not modify Rust source files that were not already changed by the pull
-request. Do not change executable behavior.
+request.
 
 Do not modify governance or engineering policy documentation, including:
 
