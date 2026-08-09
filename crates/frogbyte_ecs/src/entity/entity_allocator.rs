@@ -90,10 +90,8 @@ impl EntityAllocator {
     }
 
     pub fn is_alive(&self, entity: Entity) -> bool {
-        if let Some(slot) = self.slots.get(entity.index() as usize) {
-            return slot.is_alive;
-        }
-
-        false
+        self.slots
+            .get(entity.index() as usize)
+            .is_some_and(|slot| slot.is_alive && slot.generation == entity.generation)
     }
 }
