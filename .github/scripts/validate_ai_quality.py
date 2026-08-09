@@ -9,7 +9,6 @@ import pathlib
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
 
 
 CRATE = r"[A-Za-z0-9_-]+"
@@ -28,106 +27,6 @@ class ValidationError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class InsertedLine:
-    index: int
-    data: bytes
-    kind: str
-
-
-def split_lf_lines(data: bytes) -> list[bytes]:
-    """Split only at LF while preserving exact source bytes and CRLF."""
-
-    lines: list[bytes] = []
-    start = 0
-
-    while True:
-        newline = data.find(b"\n", start)
-        if newline < 0:
-            break
-        lines.append(data[start : newline + 1])
-        start = newline + 1
-
-    if start < len(data):
-        lines.append(data[start:])
-
-    return lines
-
-
-def classify_inserted_line(line: bytes) -> str | None:
-    body = line
-    if body.endswith(b"\r\n"):
-        body = body[:-2]
-    elif body.endswith(b"\n"):
-        body = body[:-1]
-
-    stripped = body.lstrip(b" \t")
-
-    if not stripped.startswith(b"//"):
-        return None
-    if stripped.startswith(b"//!"):
-        return "inner-doc"
-    if stripped.startswith(b"///") and not stripped.startswith(b"////"):
-        return "outer-doc"
-    return "comment"
-
-
-def inserted_comment_lines(
-    before: bytes,
-    after: bytes,
-    path: str,
-) -> list[InsertedLine]:
-    """Require Rust edits to be insertions of physical //-prefixed lines.
-
-    Every pre-existing source line must remain byte-for-byte identical and in
-    the same order. A separate trusted token guard verifies that these physical
-    insertions do not alter pre-existing Rust tokens.
-    """
-
-    before_lines = split_lf_lines(before)
-    after_lines = split_lf_lines(after)
-    insertions: list[InsertedLine] = []
-
-    before_index = 0
-    after_index = 0
-
-    while before_index < len(before_lines):
-        if after_index >= len(after_lines):
-            raise ValidationError(
-                f"{path}: existing Rust lines may not be deleted or modified"
-            )
-
-        if before_lines[before_index] == after_lines[after_index]:
-            before_index += 1
-            after_index += 1
-            continue
-
-        kind = classify_inserted_line(after_lines[after_index])
-        if kind is None:
-            raise ValidationError(
-                f"{path}: Rust changes may only insert whole //-prefixed lines"
-            )
-
-        insertions.append(
-            InsertedLine(after_index, after_lines[after_index], kind)
-        )
-        after_index += 1
-
-    while after_index < len(after_lines):
-        kind = classify_inserted_line(after_lines[after_index])
-        if kind is None:
-            raise ValidationError(
-                f"{path}: Rust changes may only insert whole //-prefixed lines"
-            )
-
-        insertions.append(
-            InsertedLine(after_index, after_lines[after_index], kind)
-        )
-        after_index += 1
-
-    return insertions
-
-
 def validate_utf8(data: bytes, path: str) -> None:
     try:
         data.decode("utf-8", errors="strict")
@@ -139,7 +38,6 @@ def run_token_guard(
     token_guard: str,
     before: bytes,
     after: bytes,
-    allowed_doc_comments: int,
     path: str,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="frogbyte-ai-token-guard-") as tmp:
@@ -157,8 +55,6 @@ def run_token_guard(
                     str(before_path),
                     "--after",
                     str(after_path),
-                    "--allowed-doc-comments",
-                    str(allowed_doc_comments),
                 ],
                 capture_output=True,
                 text=True,
@@ -178,11 +74,11 @@ def run_token_guard(
     if len(diagnostic) > 2_000:
         diagnostic = diagnostic[-2_000:]
     raise ValidationError(
-        f"{path}: trusted Rust token-integrity check failed: {diagnostic}"
+        f"{path}: trusted Rust comment-integrity check failed: {diagnostic}"
     )
 
 
-def validate_insert_only_rust(
+def validate_comment_only_rust(
     before: bytes,
     after: bytes,
     path: str,
@@ -196,22 +92,15 @@ def validate_insert_only_rust(
     validate_utf8(before, path)
     validate_utf8(after, path)
 
-    insertions = inserted_comment_lines(before, after, path)
-    if not insertions:
+    if before == after:
         return
 
-    allowed_doc_comments = sum(
-        insertion.kind in {"outer-doc", "inner-doc"}
-        for insertion in insertions
-    )
     run_token_guard(
         token_guard,
         before,
         after,
-        allowed_doc_comments,
         path,
     )
-
 
 def safe_path(path: str) -> pathlib.PurePosixPath:
     pure = pathlib.PurePosixPath(path)
@@ -351,7 +240,7 @@ def validate_docs(
 
         after = target.read_bytes()
 
-        validate_insert_only_rust(
+        validate_comment_only_rust(
             before,
             after,
             path,
@@ -409,7 +298,7 @@ def expect_rust_case(
     token_guard: str,
 ) -> None:
     try:
-        validate_insert_only_rust(
+        validate_comment_only_rust(
             before,
             after,
             "crates/example/src/lib.rs",
@@ -433,100 +322,42 @@ def self_test(token_guard: str | None) -> None:
     if RUST_SOURCE.fullmatch("crates/example/src.rs") is not None:
         raise ValidationError("validator self-test accepted crates/*/src.rs")
 
-    try:
-        inserted_comment_lines(
-            b"// SAFETY[UNSAFE-001]: invariant.\nunsafe { f(); }\n",
-            b"unsafe { f(); }\n",
-            "test.rs",
-        )
-    except ValidationError:
-        pass
-    else:
-        raise ValidationError("validator self-test allowed SAFETY deletion")
-
-    try:
-        inserted_comment_lines(
-            b"/** Existing. */\npub struct A;\n",
-            b"pub struct A;\n/** Existing. */\n",
-            "test.rs",
-        )
-    except ValidationError:
-        pass
-    else:
-        raise ValidationError("validator self-test allowed block comment move")
-
     if token_guard is None:
         print(
             "AI quality validator core self-tests passed; "
-            "token-integrity tests skipped."
+            "comment-integrity tests skipped."
         )
         return
 
     cases = [
         (
-            "ordinary comment",
+            "add ordinary comment",
             b"pub struct A;\n",
             b"// Explanation.\npub struct A;\n",
             True,
         ),
         (
-            "outer rustdoc",
+            "rewrite ordinary comment",
+            b"// Old.\npub struct A;\n",
+            b"// Updated.\npub struct A;\n",
+            True,
+        ),
+        (
+            "delete ordinary comment",
+            b"// Obsolete.\npub struct A;\n",
             b"pub struct A;\n",
-            b"/// Documentation.\npub struct A;\n",
             True,
         ),
         (
-            "inner module rustdoc",
-            b"pub struct A;\n",
-            b"//! Module documentation.\npub struct A;\n",
+            "rewrite outer rustdoc",
+            b"/// Old.\npub struct A;\n",
+            b"/// Updated.\npub struct A;\n",
             True,
         ),
         (
-            "quote character literal",
-            b'const QUOTE: char = \'\\"\';\n',
-            b'/// Quote.\nconst QUOTE: char = \'\\"\';\n',
-            True,
-        ),
-        (
-            "quote byte literal",
-            b'const QUOTE: u8 = b\'\\"\';\n',
-            b'/// Quote.\nconst QUOTE: u8 = b\'\\"\';\n',
-            True,
-        ),
-        (
-            "custom attribute unchanged",
-            b"#[custom]\npub struct A;\n",
-            b"/// Documentation.\n#[custom]\npub struct A;\n",
-            True,
-        ),
-        (
-            "attribute after another item",
-            b"pub struct A; #[custom] pub struct B;\n",
-            b"/// Documentation.\npub struct A; #[custom] pub struct B;\n",
-            True,
-        ),
-        (
-            "macro source-location shift",
-            b"const LINE: u32 = line!();\n",
-            b"// Explanation.\nconst LINE: u32 = line!();\n",
-            True,
-        ),
-        (
-            "track-caller source-location shift",
-            b"fn f() { None::<u8>.unwrap(); }\n",
-            b"/// Documentation.\nfn f() { None::<u8>.unwrap(); }\n",
-            True,
-        ),
-        (
-            "macro words in literal",
-            b'pub const S: &str = "MacCall MacroDef";\n',
-            b'/// Documentation.\npub const S: &str = "MacCall MacroDef";\n',
-            True,
-        ),
-        (
-            "CRLF source",
-            b"pub struct A;\r\n",
-            b"/// Documentation.\r\npub struct A;\r\n",
+            "rewrite block rustdoc",
+            b"/** Old. */\npub struct A;\n",
+            b"/** Updated. */\npub struct A;\n",
             True,
         ),
         (
@@ -536,27 +367,9 @@ def self_test(token_guard: str | None) -> None:
             False,
         ),
         (
-            "existing comment edit",
-            b"// Existing.\npub struct A;\n",
-            b"// Rewritten.\npub struct A;\n",
-            False,
-        ),
-        (
-            "existing rustdoc edit",
-            b"/// Existing.\npub struct A;\n",
-            b"/// Rewritten.\npub struct A;\n",
-            False,
-        ),
-        (
-            "explicit doc attribute",
-            b"pub struct A;\n",
-            b'#[doc = "Documentation."]\npub struct A;\n',
-            False,
-        ),
-        (
-            "raw string fake ordinary comment",
-            b'const S: &str = r#"\nvalue\n"#;\n',
-            b'const S: &str = r#"\n// not a comment\nvalue\n"#;\n',
+            "explicit doc attribute edit",
+            b'#[doc = "Old."]\npub struct A;\n',
+            b'#[doc = "Updated."]\npub struct A;\n',
             False,
         ),
         (
@@ -566,10 +379,34 @@ def self_test(token_guard: str | None) -> None:
             False,
         ),
         (
-            "block rustdoc content insertion",
-            b"/** Existing documentation. */\npub struct A;\n",
-            b"/**\n// inserted physical line\nExisting documentation. */\npub struct A;\n",
+            "punctuation jointness",
+            b"macro_rules! m { () => { call!(+ /* gap */ =); }; }\n",
+            b"macro_rules! m { () => { call!(+=); }; }\n",
             False,
+        ),
+        (
+            "SAFETY rewrite",
+            b"// SAFETY[UNSAFE-001]: invariant.\nunsafe { f(); }\n",
+            b"// SAFETY[UNSAFE-001]: changed.\nunsafe { f(); }\n",
+            False,
+        ),
+        (
+            "SAFETY deletion",
+            b"// SAFETY[UNSAFE-001]: invariant.\nunsafe { f(); }\n",
+            b"unsafe { f(); }\n",
+            False,
+        ),
+        (
+            "rustdoc Safety section",
+            b"/// # Safety\n/// Old contract.\npub unsafe fn f() {}\n",
+            b"/// # Safety\n/// Updated contract.\npub unsafe fn f() {}\n",
+            True,
+        ),
+        (
+            "CRLF source",
+            b"/// Old.\r\npub struct A;\r\n",
+            b"/// Updated.\r\npub struct A;\r\n",
+            True,
         ),
     ]
 
@@ -583,7 +420,6 @@ def self_test(token_guard: str | None) -> None:
         )
 
     print("AI quality validator self-tests passed.")
-
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()

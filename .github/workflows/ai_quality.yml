@@ -320,23 +320,33 @@ jobs:
                 already touched by the pull request;
               - `pr-head/docs/api/**` for longer API-oriented documentation.
 
-              Rust source edits are insert-only. You may ADD whole lines that
-              contain `///`, `//!`, or `//`, but you must not delete, rewrite,
-              reorder, or otherwise modify any existing Rust source line,
-              including existing comments and SAFETY annotations. Do not insert
-              blank lines as part of the Rust source edit. Do not use block
-              comments or `#[doc = ...]` attributes.
+              Rust source edits are comment-maintenance-only. You may add,
+              update, remove, or relocate Rust comments and Rustdoc, including
+              line and block comment forms. Prefer `//`, `///`, and `//!` for
+              new documentation unless a block form is clearly more appropriate.
 
-              Use `//!` only when inner/module documentation is structurally
-              appropriate. Do not intentionally change program behavior.
+              When existing relevant documentation is stale, update or remove
+              it instead of appending contradictory text.
 
-              The trusted workflow proves source and token integrity, not full
-              semantic equivalence. Every pre-existing Rust source line must
-              remain byte-for-byte unchanged and in the same order. A trusted
-              token guard additionally requires all pre-existing Rust tokens to
-              remain unchanged; the only tokenized additions it permits are
-              `doc` attributes produced by inserted `///` or `//!` comments.
+              Never modify non-comment Rust syntax, identifiers, literals,
+              punctuation, attributes, or token boundaries. Do not add or edit
+              explicit `#[doc = ...]` / `#![doc = ...]` attributes.
 
+              Existing non-doc comments containing `SAFETY` are protected
+              annotations. Do not add, delete, move, or rewrite them. Rustdoc
+              `# Safety` sections remain normal documentation and may be
+              maintained when the documented contract changed in the PR.
+
+              Use inner/module Rustdoc only when structurally appropriate. Do
+              not intentionally change program behavior.
+
+              The trusted workflow lexes the before/after Rust source and
+              requires every non-comment token kind and exact lexeme to remain
+              unchanged, in the same order, with the same lexical separation
+              from adjacent code tokens. Only comments and whitespace may vary,
+              while protected non-doc SAFETY comments must remain unchanged.
+
+              This proves source-token integrity, not semantic equivalence.
               Documentation can still affect observable source locations, and
               Rustdoc is visible to macros as `doc` attributes. Normal CI and
               human review therefore remain mandatory before merge.
