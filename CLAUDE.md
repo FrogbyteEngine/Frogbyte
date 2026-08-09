@@ -191,28 +191,97 @@ When triggered by `agent:benchmarks`, work only under:
 
 Do not modify any other path for this task.
 
+Frogbyte is an experimental, data-oriented 3D game engine intended to retain
+control over performance-sensitive systems.
+
+Treat benchmarks as long-lived performance baselines. Prefer workloads that
+help reveal meaningful scaling, allocation, memory-access, cache-sensitive, or
+hot-path regressions as the engine evolves.
+
+Existing benchmark files are maintainable.
+
+Before writing benchmark changes:
+
+1. inspect the pull request behavior and implementation;
+2. inspect the relevant existing benchmarks for the affected crate;
+3. determine whether existing benchmarks still represent the behavior and
+   workloads affected by the pull request.
+
+When an existing benchmark became stale because the API, workload, or behavior
+changed, update, rewrite, or remove it instead of appending contradictory or
+duplicate coverage.
+
+Preserve existing benchmark group names and benchmark IDs when the workload
+semantics remain equivalent. Rename or remove them when their meaning actually
+changed. Stable benchmark identities make longitudinal local comparisons more
+useful.
+
 Add or improve benchmarks only when they measure realistic,
 performance-sensitive workloads.
 
 Good ECS candidates include, when relevant:
 
-- entity allocation;
-- entity slot reuse;
+- entity allocation and slot reuse;
+- repeated entity creation/destruction churn;
 - bulk entity destruction;
 - component insertion/removal;
 - archetype migration;
 - archetype lookup;
 - sequential query iteration;
-- mutable query iteration.
+- mutable query iteration;
+- other operations expected to execute at high frequency or over large entity
+  sets.
+
+Choose Criterion measurement structure deliberately:
+
+- use `iter` when the same immutable input or state can safely be reused;
+- use `iter_batched` or `iter_batched_ref` when each measured iteration needs
+  fresh or mutable setup state;
+- keep expensive setup outside the measured routine unless setup itself is the
+  workload being benchmarked;
+- avoid unintentionally including teardown, destruction, or deallocation in
+  the measurement unless that cost is intentionally part of the workload;
+- when a consumed value would otherwise be destroyed inside the measured
+  closure, structure the routine so unrelated destruction happens outside the
+  intended measured operation when practical;
+- use `BatchSize::SmallInput` for genuinely small setup/output values and
+  `BatchSize::LargeInput` when retaining many setup/output values could create
+  excessive memory pressure;
+- avoid `BatchSize::PerIteration` unless the workload genuinely requires it;
+- use `Throughput::Elements` or `Throughput::Bytes` for bulk workloads when it
+  makes the result easier to interpret;
+- prefer `bench_with_input` and `BenchmarkId` for parameterized workloads;
+- use several representative scales when scaling behavior matters, without
+  choosing pathological sizes merely to make a benchmark look substantial;
+- use `std::hint::black_box` only where it is needed to prevent optimization
+  from removing relevant inputs or results.
+
+Benchmark the intended workload rather than incidental implementation details.
+
+Do not describe an implementation detail as a stable guarantee unless the
+existing API, tests, or accepted project documentation intentionally makes it
+part of the contract.
+
+Do not invent future engine behavior to justify a benchmark. If a query,
+archetype, scheduling, or storage behavior does not exist yet, do not describe
+the current benchmark as modelling that future behavior.
+
+Comments should explain the workload being measured and why it is
+performance-relevant. Do not make unproven claims such as "worst case",
+"optimal", or "fast path" unless they follow directly from the implementation
+being benchmarked.
 
 Do not:
 
-- benchmark trivial getters, constructors, constants, or cold paths;
+- benchmark trivial getters, constructors, constants, or cold paths unless they
+  are demonstrably part of a meaningful high-frequency workload;
 - add hard timing thresholds to normal CI;
 - claim performance improvements without measurements;
 - optimize production code during this task;
 - modify manifests;
-- add a benchmark framework or dependency.
+- add a benchmark framework or dependency;
+- replace a stable benchmark with a different workload while keeping a
+  misleadingly identical name.
 
 If the repository does not already contain a suitable benchmark harness for
 the affected crate, make no benchmark changes and report that the task was
@@ -248,7 +317,10 @@ Before finishing:
    non-doc `SAFETY` annotations.
 6. Verify `agent:docs` prose files are confined to `docs/api/**` or directly
    relevant crate `README.md` files.
-7. Verify benchmark edits are confined to `crates/*/benches/**`.
+7. Verify benchmark edits are confined to `crates/*/benches/**`, existing
+   relevant benchmarks were checked for staleness, setup and measurement are
+   intentionally separated, benchmark identities remain meaningful, and no
+   unsupported performance or architectural claims were introduced.
 8. Do not execute pull-request-controlled project code.
 9. Do not stage, commit, push, or alter Git history; leave one focused working
    tree change set for the trusted workflow to audit and publish.

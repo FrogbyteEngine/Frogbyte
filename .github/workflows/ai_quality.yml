@@ -361,8 +361,34 @@ jobs:
               `docs/PROJECT_CHARTER.md`.
 
             - `agent:benchmarks`:
-              Generate or improve realistic benchmarks relevant to this pull
-              request.
+              Generate, maintain, or improve realistic benchmarks relevant to
+              this pull request.
+
+              Before editing, inspect the affected implementation and all
+              relevant existing benchmarks for the affected crate.
+
+              Existing benchmarks are maintainable. If this pull request makes
+              an existing benchmark stale, update, rewrite, or remove it rather
+              than appending duplicate or contradictory coverage.
+
+              Treat Frogbyte benchmarks as long-lived performance baselines for
+              a data-oriented 3D engine with performance-sensitive systems.
+              Prefer meaningful hot-path and scaling-sensitive workloads over
+              trivial microbenchmarks.
+
+              Preserve benchmark names and IDs when workload semantics remain
+              equivalent so longitudinal comparisons stay meaningful.
+
+              Follow the Criterion measurement methodology in the trusted
+              `CLAUDE.md`, including deliberate setup isolation, timing-loop and
+              batch-size selection, throughput reporting for meaningful bulk
+              operations, representative input scales, and careful
+              `std::hint::black_box` usage.
+
+              Do not intentionally measure unrelated setup or teardown costs.
+              Do not invent future engine behavior or promote incidental
+              implementation details to stable benchmark contracts.
+
               You may modify ONLY `pr-head/crates/*/benches/**`.
               If no suitable benchmark harness already exists, make no code
               changes.
@@ -387,6 +413,9 @@ jobs:
 
           claude_args: |
             --max-turns ${{ github.event.label.name == 'agent:docs' && '30' || '20' }}
+            ${{ github.event.label.name == 'agent:benchmarks' && '--model opus' || '' }}
+            ${{ github.event.label.name == 'agent:benchmarks' && '--effort xhigh' || '' }}
+            ${{ github.event.label.name == 'agent:benchmarks' && '--fallback-model sonnet' || '' }}
             --add-dir pr-head
             --allowedTools "Read,Glob,Grep,Edit,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*)"
             --disallowedTools "Bash(git:*),Bash(cargo:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
