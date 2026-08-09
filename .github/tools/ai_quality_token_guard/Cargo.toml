@@ -6,7 +6,7 @@ rust-version = "1.97.1"
 publish = false
 
 [dependencies]
-proc-macro2 = { version = "=1.0.107", default-features = false }
+ra-ap-rustc_lexer = "=0.174.0"
 
 [lints.rust]
 unsafe_code = "forbid"

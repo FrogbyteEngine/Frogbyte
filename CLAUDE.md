@@ -125,26 +125,37 @@ Allowed work:
 - directly relevant crate `README.md` files for crates already touched by the
   pull request.
 
-Rust source work is intentionally insert-only. Existing Rust lines must remain
-byte-for-byte unchanged and in the same order. Never delete or rewrite an
-existing source line, including an existing comment, Rustdoc line, or
-`SAFETY[...]` annotation. Do not add blank lines as part of the Rust source
-edit. Use only whole-line `//`, `///`, or structurally appropriate `//!` insertions.
-Do not use block comments or `#[doc = ...]` attributes.
+Rust source work is comment-maintenance-only. Existing comments and Rustdoc may
+be added, updated, removed, or relocated when that keeps documentation aligned
+with the pull request. Prefer line comments (`//`, `///`, `//!`) for new
+documentation unless a block form is clearly more appropriate.
+
+When relevant documentation is stale, update or remove it instead of appending
+contradictory text.
+
+Never modify non-comment Rust syntax, identifiers, literals, punctuation,
+attributes, or token boundaries. Do not add or edit explicit `#[doc = ...]` or
+`#![doc = ...]` attributes.
+
+Existing non-doc comments containing `SAFETY` are protected annotations. Never
+add, delete, move, or rewrite them during `agent:docs`. Rustdoc `# Safety`
+sections are ordinary API documentation and may be maintained when the pull
+request changes the documented safety contract.
 
 Do not intentionally change program behavior.
 
-The trusted workflow proves source and token integrity, not full semantic
-equivalence. Every pre-existing Rust source line must remain byte-for-byte
-unchanged and in the same order. A trusted token guard requires every
-pre-existing Rust token to remain unchanged; the only tokenized additions it
-permits are `doc` attributes produced by newly inserted `///` or `//!` lines.
+The trusted workflow lexes the source before and after the documentation task.
+It requires every non-comment Rust token kind and exact lexeme to remain
+unchanged, in the same order, with the same lexical separation from adjacent
+code tokens. Only comments and whitespace may vary, while protected non-doc
+`SAFETY` comments must remain unchanged.
 
-Ordinary non-doc comments are Rust whitespace. Rustdoc comments become `doc`
-attributes, and adding physical source lines can change observable source
-locations such as panic locations, `line!()`, or `Location::caller()`. These
-effects are intentionally outside the mechanical guarantee. Normal CI and
-human maintainer review remain mandatory before merge.
+This proves source-token integrity, not full semantic equivalence. Non-doc
+comments are Rust whitespace, while Rustdoc comments become `doc` attributes.
+Comment maintenance can still change observable source locations such as panic
+locations, `line!()`, or `Location::caller()`, and Rustdoc remains visible to
+macros. These effects are intentionally outside the mechanical guarantee.
+Normal CI and human maintainer review remain mandatory before merge.
 
 Do not modify Rust source files that were not already changed by the pull
 request.
@@ -232,8 +243,9 @@ Before finishing:
 2. Verify every edit belongs to the triggering label.
 3. Verify no forbidden file was modified.
 4. Verify `agent:tests` edits are confined to `crates/*/tests/**`.
-5. Verify `agent:docs` Rust edits are line-comment-only and confined to Rust
-   files already changed by the pull request.
+5. Verify `agent:docs` Rust edits modify only comments/whitespace in Rust
+   files already changed by the pull request, and do not alter protected
+   non-doc `SAFETY` annotations.
 6. Verify `agent:docs` prose files are confined to `docs/api/**` or directly
    relevant crate `README.md` files.
 7. Verify benchmark edits are confined to `crates/*/benches/**`.
