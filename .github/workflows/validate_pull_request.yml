@@ -22,10 +22,12 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           node <<'NODE'
           const title = (process.env.PR_TITLE ?? "").trim();
           const body = process.env.PR_BODY ?? "";
+          const author = process.env.PR_AUTHOR ?? "";
 
           const allowedAreas = [
             "ECS",
@@ -50,6 +52,10 @@ jobs:
           const issueReferencePattern =
             /\b(?:Closes|Fixes|Resolves|Refs)\s+(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+\b/i;
 
+          const isDependabotDependencyUpdate =
+            author === "dependabot[bot]" &&
+            title.startsWith("Dependencies: ");
+
           const errors = [];
 
           if (!titlePattern.test(title)) {
@@ -70,7 +76,10 @@ jobs:
             errors.push("Use GitHub's draft state instead of WIP in the title.");
           }
 
-          if (!issueReferencePattern.test(body)) {
+          if (
+            !isDependabotDependencyUpdate &&
+            !issueReferencePattern.test(body)
+          ) {
             errors.push(
               'The pull request body must contain "Closes #123" or "Refs #123".'
             );
@@ -88,6 +97,15 @@ jobs:
             );
 
             process.exit(1);
+          }
+
+          if (
+            isDependabotDependencyUpdate &&
+            !issueReferencePattern.test(body)
+          ) {
+            console.log(
+              "Dependabot dependency update: issue reference is not required."
+            );
           }
 
           console.log("The pull request follows the Frogbyte policy.");

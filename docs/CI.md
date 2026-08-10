@@ -309,7 +309,7 @@ Pull request titles:
 
 GitHub's draft state should be used instead of adding `WIP` to the title.
 
-The pull request body must also reference an issue with one of the supported forms:
+Human-authored pull request bodies must also reference an issue with one of the supported forms:
 
 ```text
 Closes #123
@@ -320,7 +320,13 @@ Refs #123
 
 Repository-qualified issue references are also supported.
 
-This policy keeps the pull request history consistent and preserves traceability between changes and their related issues.
+Dependabot dependency-update pull requests authored by `dependabot[bot]` and using the `Dependencies` area are exempt from the issue-reference requirement.
+
+The exception applies only to the issue reference. Dependabot pull requests must still satisfy the normal title policy and all required CI and security validation.
+
+Human-authored dependency pull requests must continue to reference an issue.
+
+This policy keeps the pull request history consistent and preserves traceability between normal development changes and their related issues without requiring artificial issues for automated dependency maintenance.
 
 ## Scheduled validation
 
@@ -395,6 +401,10 @@ Dependabot can propose a pull request that moves a pinned action from one review
 Dependabot can keep at most five open update pull requests per ecosystem.
 
 Dependabot commits use the `Dependencies` prefix so they comply with Frogbyte's pull request naming conventions.
+
+Dependabot-authored dependency update pull requests are exempt from the normal issue-reference requirement because they are generated maintenance changes rather than implementation work originating from a Frogbyte issue.
+
+All other pull request policy, CI, and security requirements continue to apply.
 
 ## Toolchain and reproducibility
 
