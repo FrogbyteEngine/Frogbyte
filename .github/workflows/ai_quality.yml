@@ -43,6 +43,7 @@ jobs:
 
     env:
       QUALITY_TASK: ${{ github.event.label.name }}
+      CLAUDE_MAX_TURNS: ${{ github.event.label.name == 'agent:benchmarks' && '40' || github.event.label.name == 'agent:docs' && '30' || '20' }}
 
     steps:
       - name: Check command label is still active
@@ -417,10 +418,10 @@ jobs:
             - not include a Conventional Commit type or scope;
             - not mention Claude, AI, the agent, the pull request, or PR coverage;
             - contain exactly one line;
-            - keep the complete commit subject within 72 characters after the workflow 
-              adds its deterministic Conventional Commit type;
-              contain at most 66 characters for `agent:tests` and `agent:docs`;
-              contain at most 61 characters for `agent:benchmarks`;
+            - keep the complete commit subject within 72 characters after the
+              workflow adds its deterministic Conventional Commit type;
+            - contain at most 66 characters for `agent:tests` and `agent:docs`;
+            - contain at most 61 characters for `agent:benchmarks`;
             - not start or end with whitespace;
             - not end with a period.
 
@@ -429,11 +430,12 @@ jobs:
             `no useful in-scope changes`.
 
           claude_args: |
-            --max-turns ${{ github.event.label.name == 'agent:docs' && '30' || '20' }}
+            --max-turns ${{ env.CLAUDE_MAX_TURNS }}
             ${{ github.event.label.name == 'agent:benchmarks' && '--model opus' || '' }}
             ${{ github.event.label.name == 'agent:benchmarks' && '--effort xhigh' || '' }}
             ${{ github.event.label.name == 'agent:benchmarks' && '--fallback-model sonnet' || '' }}
-            --json-schema '{"type":"object","properties":{"commit_description":{"type":"string","description":"One-line English imperative summary of the useful in-scope changes, without a Conventional Commit type or scope. Keep the complete commit subject within 72 characters after the workflow adds its deterministic type: the description may use at most 66 characters for agent:tests and agent:docs, and 61 characters for agent:benchmarks. Do not mention Claude, AI, the agent, the pull request, or PR coverage."}},"required":["commit_description"],"additionalProperties":false}'            --add-dir pr-head
+            --json-schema '{"type":"object","properties":{"commit_description":{"type":"string","description":"One-line English imperative summary of the useful in-scope changes, without a Conventional Commit type or scope. Keep the complete commit subject within 72 characters after the workflow adds its deterministic type: the description may use at most 66 characters for agent:tests and agent:docs, and 61 characters for agent:benchmarks. Do not mention Claude, AI, the agent, the pull request, or PR coverage."}},"required":["commit_description"],"additionalProperties":false}'
+            --add-dir pr-head
             --allowedTools "Read,Glob,Grep,Edit,Write,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*)"
             --disallowedTools "Bash(git:*),Bash(cargo:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr merge:*)"
 
@@ -689,21 +691,32 @@ jobs:
             exit 0
           fi
 
-          # The execution file is stream JSON and may contain arbitrary PR
-          # content in tool results. Never grep the complete transcript for
-          # quota phrases: old comments or source text can create false
-          # positives. Inspect only structured top-level events.
+          # The pinned Claude action currently writes the execution transcript
+          # as one JSON array. Keep a JSONL fallback for compatibility with older
+          # or future action implementations. Inspect only structured top-level
+          # events so untrusted PR content cannot create quota false positives.
           if [[ -z "$EXECUTION_FILE" || ! -f "$EXECUTION_FILE" ]]; then
             exit 0
           fi
 
           classification="$(
-            python3 - "$EXECUTION_FILE" <<'PY'
+            python3 - "$EXECUTION_FILE" "$CLAUDE_MAX_TURNS" <<'PY'
           import json
           import re
           import sys
 
           path = sys.argv[1]
+
+          try:
+              configured_max_turns = int(sys.argv[2])
+          except (IndexError, TypeError, ValueError):
+              print("other")
+              raise SystemExit(0)
+
+          if configured_max_turns <= 0:
+              print("other")
+              raise SystemExit(0)
+
           limit_text = re.compile(
               r"(?:"
               r"you(?:'ve| have) hit your limit|"
@@ -716,67 +729,94 @@ jobs:
               re.IGNORECASE,
           )
 
+          def load_events(filename):
+              try:
+                  with open(filename, encoding="utf-8") as handle:
+                      payload = json.load(handle)
+              except OSError:
+                  return []
+              except json.JSONDecodeError:
+                  events = []
+                  try:
+                      with open(filename, encoding="utf-8") as handle:
+                          for raw_line in handle:
+                              raw_line = raw_line.strip()
+                              if not raw_line:
+                                  continue
+                              try:
+                                  event = json.loads(raw_line)
+                              except (json.JSONDecodeError, TypeError):
+                                  continue
+                              if isinstance(event, dict):
+                                  events.append(event)
+                  except OSError:
+                      return []
+                  return events
+
+              if isinstance(payload, list):
+                  return [event for event in payload if isinstance(event, dict)]
+              if isinstance(payload, dict):
+                  return [payload]
+              return []
+
           reached = False
           max_turns = False
 
-          try:
-              handle = open(path, encoding="utf-8")
-          except OSError:
-              print("other")
-              raise SystemExit(0)
+          for event in load_events(path):
+              event_type = event.get("type")
 
-          with handle:
-              for raw_line in handle:
-                  raw_line = raw_line.strip()
-                  if not raw_line:
-                      continue
-
-                  try:
-                      event = json.loads(raw_line)
-                  except (json.JSONDecodeError, TypeError):
-                      continue
-
-                  # Claude stream JSON may contain valid JSON values that are not event
-                  # objects. Ignore them instead of assuming `.get`.
-                  if not isinstance(event, dict):
-                      continue
-
-                  event_type = event.get("type")
-
-                  if event_type == "rate_limit_event":
-                      info = event.get("rate_limit_info")
-                      if isinstance(info, dict) and info.get("status") == "rejected":
-                          limit_type = str(info.get("rateLimitType") or "").lower()
-                          normalized = limit_type.replace("-", "_")
-                          if normalized.startswith(("five_hour", "seven_day")):
-                              reached = True
-                              break
-
-                  if event_type == "assistant" and event.get("error") == "rate_limit":
-                      message = event.get("message")
-                      if isinstance(message, dict):
-                          content = message.get("content")
-                          if isinstance(content, list):
-                              for item in content:
-                                  if (
-                                      isinstance(item, dict)
-                                      and item.get("type") == "text"
-                                      and limit_text.search(str(item.get("text") or ""))
-                                  ):
-                                      reached = True
-                                      break
-
-                      if reached:
-                          break
-
-                  if event_type == "result" and event.get("is_error") is True:
-                      if event.get("subtype") == "error_max_turns":
-                          max_turns = True
-
-                      result = event.get("result")
-                      if isinstance(result, str) and limit_text.search(result):
+              if event_type == "rate_limit_event":
+                  info = event.get("rate_limit_info")
+                  if isinstance(info, dict) and info.get("status") == "rejected":
+                      limit_type = str(info.get("rateLimitType") or "").lower()
+                      normalized = limit_type.replace("-", "_")
+                      if normalized.startswith(("five_hour", "seven_day")):
                           reached = True
                           break
+
+              if event_type == "assistant" and event.get("error") == "rate_limit":
+                  message = event.get("message")
+                  if isinstance(message, dict):
+                      content = message.get("content")
+                      if isinstance(content, list):
+                          for item in content:
+                              if (
+                                  isinstance(item, dict)
+                                  and item.get("type") == "text"
+                                  and limit_text.search(str(item.get("text") or ""))
+                              ):
+                                  reached = True
+                                  break
+
+                  if reached:
+                      break
+
+              if event_type != "result":
+                  continue
+
+              subtype = event.get("subtype")
+              is_error = event.get("is_error")
+
+              if is_error is True:
+                  if subtype == "error_max_turns":
+                      max_turns = True
+
+                  result = event.get("result")
+                  if isinstance(result, str) and limit_text.search(result):
+                      reached = True
+                      break
+
+              # claude-code-action fails closed when the SDK reports success
+              # after exceeding maxTurns. Recognize that upstream guardrail as
+              # a turn-limit failure rather than a generic Claude failure.
+              if subtype == "success" and is_error is False:
+                  num_turns = event.get("num_turns")
+                  if (
+                      isinstance(num_turns, int)
+                      and not isinstance(num_turns, bool)
+                      and num_turns > configured_max_turns
+                  ):
+                      max_turns = True
 
           if reached:
               print("quota")
