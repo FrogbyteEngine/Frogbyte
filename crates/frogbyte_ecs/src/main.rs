@@ -28,39 +28,62 @@ impl Comp for Test {}
 impl Comp for StringTest {}
 
 pub struct MyStorage<T> {
-    capacity: Box<[MaybeUninit<T>]>,
+    buffer: Box<[MaybeUninit<T>]>,
     len: usize,
+}
+
+impl<T> Drop for MyStorage<T> {
+    fn drop(&mut self) {
+        for i in 0..self.len {
+            unsafe {
+                self.buffer[i].assume_init_drop();
+            }
+        }
+    }
 }
 
 impl<T: Comp> MyStorage<T> {
     pub fn new() -> Self {
         Self {
-            capacity: Box::new([MaybeUninit::uninit()]),
+            buffer: Box::new([MaybeUninit::uninit()]),
             len: 0,
         }
     }
 
-    pub fn grow(&mut self) {
-        let new_size = self.capacity.len() * 2;
+    fn grow(&mut self) {
+        let new_size = self.buffer.len() * 2;
         let mut new_capacity = Box::<[T]>::new_uninit_slice(new_size);
 
         for i in 0..self.len {
             unsafe {
-                let data_value = self.capacity[i].assume_init_read();
+                let data_value = self.buffer[i].assume_init_read();
                 new_capacity[i].write(data_value);
             }
         }
 
-        self.capacity = new_capacity;
+        self.buffer = new_capacity;
     }
 
     pub fn push(&mut self, value: T) {
-        if self.len >= self.capacity.len() {
+        if self.len >= self.buffer.len() {
             self.grow();
         }
 
-        self.capacity[self.len].write(value);
+        self.buffer[self.len].write(value);
         self.len += 1;
+    }
+
+    pub fn pop(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None;
+        }
+
+        self.len -= 1;
+
+        unsafe {
+            return Some(self.buffer[self.len - 1].assume_init_read());
+        }
+
     }
 }
 
