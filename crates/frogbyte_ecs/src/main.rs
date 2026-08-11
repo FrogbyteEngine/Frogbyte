@@ -81,9 +81,26 @@ impl<T: Comp> MyStorage<T> {
         self.len -= 1;
 
         unsafe {
-            return Some(self.buffer[self.len - 1].assume_init_read());
+            return Some(self.buffer[self.len].assume_init_read());
         }
+    }
 
+    pub fn swap_remove(&mut self, index: usize) -> T {
+        assert!(index < self.len);
+
+        let data_value_to_remove = unsafe {
+            self.buffer[index].assume_init_read()
+        };
+
+        self.len -= 1;
+
+        if index != self.len {
+            unsafe {
+                self.buffer[index].write(self.buffer[self.len].assume_init_read());
+            }
+        }
+        
+        data_value_to_remove
     }
 }
 
