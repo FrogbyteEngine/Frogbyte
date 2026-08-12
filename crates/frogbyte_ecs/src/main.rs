@@ -1,7 +1,7 @@
-use std::{
-    mem::{MaybeUninit, align_of, size_of},
-    ptr::{self, NonNull},
-};
+// use std::{
+//     mem::{MaybeUninit, align_of, size_of},
+//     ptr::{self, NonNull},
+// };
 
 pub trait Comp {}
 
@@ -27,91 +27,138 @@ impl Comp for Test {}
 
 impl Comp for StringTest {}
 
-pub struct MyStorage<T> {
-    buffer: Box<[MaybeUninit<T>]>,
+// pub struct MyStorage<T> {
+//     buffer: Box<[MaybeUninit<T>]>,
+//     len: usize,
+// }
+
+// impl<T> Drop for MyStorage<T> {
+//     fn drop(&mut self) {
+//         for i in 0..self.len {
+//             unsafe {
+//                 self.buffer[i].assume_init_drop();
+//             }
+//         }
+//     }
+// }
+
+// impl<T: Comp> MyStorage<T> {
+//     pub fn new() -> Self {
+//         Self {
+//             buffer: Box::new([MaybeUninit::uninit()]),
+//             len: 0,
+//         }
+//     }
+
+//     fn grow(&mut self) {
+//         let new_size = self.buffer.len() * 2;
+//         let mut new_capacity = Box::<[T]>::new_uninit_slice(new_size);
+
+//         for i in 0..self.len {
+//             unsafe {
+//                 let data_value = self.buffer[i].assume_init_read();
+//                 new_capacity[i].write(data_value);
+//             }
+//         }
+
+//         self.buffer = new_capacity;
+//     }
+
+//     pub fn push(&mut self, value: T) {
+//         if self.len >= self.buffer.len() {
+//             self.grow();
+//         }
+
+//         self.buffer[self.len].write(value);
+//         self.len += 1;
+//     }
+
+//     pub fn pop(&mut self) -> Option<T> {
+//         if self.len == 0 {
+//             return None;
+//         }
+
+//         self.len -= 1;
+
+//         unsafe {
+//             return Some(self.buffer[self.len].assume_init_read());
+//         }
+//     }
+
+//     pub fn swap_remove(&mut self, index: usize) -> T {
+//         assert!(index < self.len);
+
+//         let data_value_to_remove = unsafe {
+//             self.buffer[index].assume_init_read()
+//         };
+
+//         self.len -= 1;
+
+//         if index != self.len {
+//             unsafe {
+//                 self.buffer[index].write(self.buffer[self.len].assume_init_read());
+//             }
+//         }
+        
+//         data_value_to_remove
+//     }
+// }
+
+// fn main() {
+//     let mut custom_vec = MyStorage::<Position>::new();
+
+//     let pos = Position {
+//         x: 77.0,
+//         y: 102.0,
+//         z: 0.11,
+//     };
+
+//     custom_vec.push(pos);
+// }
+
+use std::{alloc::{Layout, alloc, handle_alloc_error, realloc}, ptr::NonNull};
+
+
+pub struct BlobVec {
+    ptr: NonNull<u8>,
+    capacity: usize,
     len: usize,
+    layout: Layout,
 }
 
-impl<T> Drop for MyStorage<T> {
-    fn drop(&mut self) {
-        for i in 0..self.len {
-            unsafe {
-                self.buffer[i].assume_init_drop();
-            }
-        }
-    }
-}
-
-impl<T: Comp> MyStorage<T> {
-    pub fn new() -> Self {
+impl BlobVec {
+    pub fn new<T: Comp>() -> Self {
         Self {
-            buffer: Box::new([MaybeUninit::uninit()]),
+            ptr: NonNull::dangling(),
+            capacity: 0,
             len: 0,
+            layout: Layout::new::<T>(),
         }
     }
 
     fn grow(&mut self) {
-        let new_size = self.buffer.len() * 2;
-        let mut new_capacity = Box::<[T]>::new_uninit_slice(new_size);
+        let new_capacity = if self.capacity == 0 {1} else {self.capacity * 2};
 
-        for i in 0..self.len {
-            unsafe {
-                let data_value = self.buffer[i].assume_init_read();
-                new_capacity[i].write(data_value);
-            }
-        }
+        let (new_layout, _) = Layout::repeat(&self.layout, new_capacity).unwrap();
 
-        self.buffer = new_capacity;
-    }
-
-    pub fn push(&mut self, value: T) {
-        if self.len >= self.buffer.len() {
-            self.grow();
-        }
-
-        self.buffer[self.len].write(value);
-        self.len += 1;
-    }
-
-    pub fn pop(&mut self) -> Option<T> {
-        if self.len == 0 {
-            return None;
-        }
-
-        self.len -= 1;
-
-        unsafe {
-            return Some(self.buffer[self.len].assume_init_read());
-        }
-    }
-
-    pub fn swap_remove(&mut self, index: usize) -> T {
-        assert!(index < self.len);
-
-        let data_value_to_remove = unsafe {
-            self.buffer[index].assume_init_read()
+        let new_ptr = if self.capacity == 0 {
+            unsafe { alloc(new_layout) }
+        } else {
+            let (old_layout, _) = self.layout.repeat(self.capacity).unwrap();
+            let old_ptr = self.ptr.as_ptr() as *mut u8;
+            unsafe { realloc(old_ptr, old_layout, new_layout.size()) }
         };
 
-        self.len -= 1;
+        self.ptr = match NonNull::new(new_ptr as *mut u8) {
+            Some(p) => p,
+            None => handle_alloc_error(new_layout),
+        };
 
-        if index != self.len {
-            unsafe {
-                self.buffer[index].write(self.buffer[self.len].assume_init_read());
-            }
-        }
-        
-        data_value_to_remove
+        self.capacity = new_capacity;
+
     }
 }
 
-fn main() {
-    let mut custom_vec = MyStorage::<Position>::new();
+pub fn main() {
 
-    let pos = Position {
-        x: 77.0,
-        y: 102.0,
-        z: 0.11,
-    };
-
-    custom_vec.push(pos);
 }
