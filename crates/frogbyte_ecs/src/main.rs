@@ -117,7 +117,7 @@ impl Comp for StringTest {}
 // }
 
 use std::{
-    alloc::{Layout, alloc, handle_alloc_error, realloc},
+    alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc},
     any::TypeId,
     ptr::{NonNull, read},
 };
@@ -128,6 +128,27 @@ pub struct BlobVec {
     len: usize,
     layout: Layout,
     type_id: TypeId,
+    drop_fn: unsafe fn(*mut u8),
+}
+
+impl Drop for BlobVec {
+    fn drop(&mut self) {
+        for index in 0..self.len {
+            let data = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() };
+
+            unsafe {
+                (self.drop_fn)(data);
+            }
+        }
+
+        if self.capacity != 0 {
+            let (total_layout, _) = self.layout.repeat(self.capacity).unwrap();
+
+            unsafe {
+                dealloc(self.ptr.as_ptr(), total_layout);
+            }
+        }
+    }
 }
 
 impl BlobVec {
@@ -138,6 +159,7 @@ impl BlobVec {
             len: 0,
             layout: Layout::new::<T>(),
             type_id: TypeId::of::<T>(),
+            drop_fn: Self::drop_value::<T>,
         }
     }
 
@@ -209,6 +231,12 @@ impl BlobVec {
         }
 
         value_to_remove
+    }
+
+    unsafe fn drop_value<T: Comp + 'static>(ptr: *mut u8) {
+        unsafe {
+            ptr.cast::<T>().drop_in_place();
+        }
     }
 }
 
