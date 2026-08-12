@@ -167,7 +167,9 @@ impl BlobVec {
         let new_capacity = if self.capacity == 0 {
             1
         } else {
-            self.capacity.checked_mul(2).expect("Error: BlobVec max size capacity reached.")
+            self.capacity
+                .checked_mul(2)
+                .expect("Error: BlobVec max size capacity reached.")
         };
 
         let (new_layout, _) = Layout::repeat(&self.layout, new_capacity).unwrap();
@@ -242,6 +244,17 @@ impl BlobVec {
 
         let raw_data = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() as *const T };
         Some(unsafe { &*raw_data })
+    }
+
+    pub fn get_mut<T: Comp + 'static>(&mut self, index: usize) -> Option<&mut T> {
+        assert_eq!(self.type_id, TypeId::of::<T>());
+
+        if index >= self.len {
+            return None;
+        }
+
+        let raw_data = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() } as *mut T;
+        Some(unsafe { &mut *raw_data })
     }
 
     unsafe fn drop_value<T: Comp + 'static>(ptr: *mut u8) {
