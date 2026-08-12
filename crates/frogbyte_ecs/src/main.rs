@@ -178,6 +178,19 @@ impl BlobVec {
 
         self.len += 1;
     }
+
+    pub fn pop<T: Comp + 'static>(&mut self) -> Option<T> {
+        assert_eq!(self.type_id, TypeId::of::<T>());
+
+        if self.len == 0 {
+            return None;
+        }
+
+        self.len -= 1;
+
+        let raw_value = unsafe { self.ptr.add(self.len * self.layout.size()).as_ptr() } as *mut T;
+        Some(unsafe { raw_value.read() })
+    }
 }
 
 pub fn main() {}
