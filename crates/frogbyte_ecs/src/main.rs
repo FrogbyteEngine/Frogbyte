@@ -119,7 +119,7 @@ impl Comp for StringTest {}
 use std::{
     alloc::{Layout, alloc, handle_alloc_error, realloc},
     any::TypeId,
-    ptr::NonNull,
+    ptr::{NonNull, read},
 };
 
 pub struct BlobVec {
@@ -190,6 +190,25 @@ impl BlobVec {
 
         let raw_value = unsafe { self.ptr.add(self.len * self.layout.size()).as_ptr() } as *mut T;
         Some(unsafe { raw_value.read() })
+    }
+
+    pub fn swap_remove<T: Comp + 'static>(&mut self, index: usize) -> T {
+        assert!(index < self.len);
+        assert_eq!(self.type_id, TypeId::of::<T>());
+
+        self.len -= 1;
+
+        let ptr_to_remove = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() as *mut T };
+        let value_to_remove = unsafe { ptr_to_remove.read() };
+
+        if self.len != index {
+            let raw_data_to_swap =
+                unsafe { self.ptr.add(self.len * self.layout.size()).as_ptr() as *mut T };
+            let value_to_swap = unsafe { raw_data_to_swap.read() };
+            unsafe { ptr_to_remove.write(value_to_swap) };
+        }
+
+        value_to_remove
     }
 }
 
