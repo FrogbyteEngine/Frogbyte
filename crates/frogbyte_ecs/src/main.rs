@@ -167,7 +167,7 @@ impl BlobVec {
         let new_capacity = if self.capacity == 0 {
             1
         } else {
-            self.capacity * 2
+            self.capacity.checked_mul(2).expect("Error: BlobVec max size capacity reached.")
         };
 
         let (new_layout, _) = Layout::repeat(&self.layout, new_capacity).unwrap();
