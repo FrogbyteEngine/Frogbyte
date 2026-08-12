@@ -233,6 +233,17 @@ impl BlobVec {
         value_to_remove
     }
 
+    pub fn get<T: Comp + 'static>(&self, index: usize) -> Option<&T> {
+        assert_eq!(self.type_id, TypeId::of::<T>());
+
+        if index >= self.len {
+            return None;
+        }
+
+        let raw_data = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() as *const T };
+        Some(unsafe { &*raw_data })
+    }
+
     unsafe fn drop_value<T: Comp + 'static>(ptr: *mut u8) {
         unsafe {
             ptr.cast::<T>().drop_in_place();
