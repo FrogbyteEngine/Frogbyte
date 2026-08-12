@@ -99,7 +99,7 @@ impl Comp for StringTest {}
 //                 self.buffer[index].write(self.buffer[self.len].assume_init_read());
 //             }
 //         }
-        
+
 //         data_value_to_remove
 //     }
 // }
@@ -116,28 +116,37 @@ impl Comp for StringTest {}
 //     custom_vec.push(pos);
 // }
 
-use std::{alloc::{Layout, alloc, handle_alloc_error, realloc}, ptr::NonNull};
-
+use std::{
+    alloc::{Layout, alloc, handle_alloc_error, realloc},
+    any::TypeId,
+    ptr::NonNull,
+};
 
 pub struct BlobVec {
     ptr: NonNull<u8>,
     capacity: usize,
     len: usize,
     layout: Layout,
+    type_id: TypeId,
 }
 
 impl BlobVec {
-    pub fn new<T: Comp>() -> Self {
+    pub fn new<T: Comp + 'static>() -> Self {
         Self {
             ptr: NonNull::dangling(),
             capacity: 0,
             len: 0,
             layout: Layout::new::<T>(),
+            type_id: TypeId::of::<T>(),
         }
     }
 
     fn grow(&mut self) {
-        let new_capacity = if self.capacity == 0 {1} else {self.capacity * 2};
+        let new_capacity = if self.capacity == 0 {
+            1
+        } else {
+            self.capacity * 2
+        };
 
         let (new_layout, _) = Layout::repeat(&self.layout, new_capacity).unwrap();
 
@@ -155,10 +164,20 @@ impl BlobVec {
         };
 
         self.capacity = new_capacity;
+    }
 
+    pub fn push<T: Comp + 'static>(&mut self, value: T) {
+        assert_eq!(self.type_id, TypeId::of::<T>());
+
+        if self.len >= self.capacity {
+            self.grow();
+        }
+
+        let ptr = (unsafe { self.ptr.add(self.layout.size() * self.len).as_ptr() }) as *mut T;
+        unsafe { ptr.write(value) };
+
+        self.len += 1;
     }
 }
 
-pub fn main() {
-
-}
+pub fn main() {}
