@@ -388,7 +388,7 @@ FROGBYTE_QUALITY_FALLBACK
 
 The fallback is triggered only when the workflow confidently identifies Claude
 included-usage quota exhaustion. Normal Claude failures and the configured
-40-turn limit do not trigger it.
+60-turn limit do not trigger it.
 
 Fallback writes remain limited to the task-specific scopes in `AGENTS.md`.
 Documentation fallback cannot edit Rust source because the asynchronous Codex

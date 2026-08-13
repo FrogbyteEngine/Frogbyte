@@ -939,7 +939,7 @@ jobs:
           gh api \
             --method POST \
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-            -f body="Claude reached the configured 40-turn limit while processing \`${TASK_LABEL}\`. No generated changes were published. This was not an included-usage quota event, so Codex fallback was intentionally not triggered. Re-apply the command label after this run completes to retry."
+            -f body="Claude reached the configured 60-turn limit while processing \`${TASK_LABEL}\`. No generated changes were published. This was not an included-usage quota event, so Codex fallback was intentionally not triggered. Re-apply the command label after this run completes to retry."
 
       - name: Report non-quota Claude failure
         if: >-
