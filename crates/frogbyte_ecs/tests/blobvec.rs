@@ -75,6 +75,14 @@ fn get_mut_allows_in_place_mutation() {
 }
 
 #[test]
+fn get_mut_returns_none_for_out_of_bounds_index() {
+    let mut blob = BlobVec::new::<Item>();
+    blob.push(Item(1));
+
+    assert_eq!(blob.get_mut::<Item>(1), None);
+}
+
+#[test]
 fn pop_returns_values_in_lifo_order() {
     let mut blob = BlobVec::new::<Item>();
     blob.push(Item(1));
@@ -272,9 +280,36 @@ fn get_panics_on_component_type_mismatch() {
 
 #[test]
 #[should_panic]
+fn get_mut_panics_on_component_type_mismatch() {
+    let mut blob = BlobVec::new::<Item>();
+    blob.push(Item(1));
+
+    let _ = blob.get_mut::<Marker>(0);
+}
+
+#[test]
+#[should_panic]
+fn pop_panics_on_component_type_mismatch() {
+    let mut blob = BlobVec::new::<Item>();
+    blob.push(Item(1));
+
+    let _ = blob.pop::<Marker>();
+}
+
+#[test]
+#[should_panic]
 fn swap_remove_panics_on_out_of_bounds_index() {
     let mut blob = BlobVec::new::<Item>();
     blob.push(Item(1));
 
     blob.swap_remove::<Item>(1);
+}
+
+#[test]
+#[should_panic]
+fn swap_remove_panics_on_component_type_mismatch() {
+    let mut blob = BlobVec::new::<Item>();
+    blob.push(Item(1));
+
+    let _ = blob.swap_remove::<Marker>(0);
 }
