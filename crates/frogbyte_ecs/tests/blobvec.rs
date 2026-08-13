@@ -151,6 +151,33 @@ fn get_panics_when_queried_type_does_not_match_the_blobvec_element_type() {
 }
 
 #[test]
+#[should_panic]
+fn get_mut_panics_when_queried_type_does_not_match_the_blobvec_element_type() {
+    let mut blob = BlobVec::new::<Counter>();
+    blob.push(Counter(1));
+
+    let _ = blob.get_mut::<Position>(0);
+}
+
+#[test]
+#[should_panic]
+fn pop_panics_when_the_requested_type_does_not_match_the_blobvec_element_type() {
+    let mut blob = BlobVec::new::<Counter>();
+    blob.push(Counter(1));
+
+    let _ = blob.pop::<Position>();
+}
+
+#[test]
+#[should_panic]
+fn swap_remove_panics_when_the_requested_type_does_not_match_the_blobvec_element_type() {
+    let mut blob = BlobVec::new::<Counter>();
+    blob.push(Counter(1));
+
+    let _ = blob.swap_remove::<Position>(0);
+}
+
+#[test]
 fn dropping_the_blobvec_drops_every_remaining_value() {
     let drops = Rc::new(RefCell::new(Vec::new()));
     let mut blob = BlobVec::new::<DropRecorder>();
