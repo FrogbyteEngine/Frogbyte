@@ -3,8 +3,8 @@
 Entity Component System for Frogbyte.
 
 This crate is in an early foundation phase. It currently provides generational
-entity identity and allocation; components, archetypes, and queries are not
-implemented yet.
+entity identity and allocation and per-type component storage; archetypes and
+queries are not implemented yet.
 
 ## Entities
 
@@ -42,3 +42,18 @@ Freed slots are currently handed back out most-recently-freed first, so
 callers should not depend on any particular reuse ordering beyond what is
 covered by the crate's tests; it is an implementation detail of the
 allocator, not a documented API guarantee.
+
+## Components
+
+[`Component`](src/component/mod.rs) is a marker trait for plain data types
+that can be stored per-entity, such as
+[`Position`](src/component/position_component.rs).
+
+[`BlobVec`](src/component/blobvec.rs) is contiguous, type-erased storage for
+the components of a single type. It is created for one concrete type, and
+every later call is checked against that type, so a mismatched call panics
+instead of reinterpreting the stored bytes.
+
+`BlobVec` does not yet associate stored components with the entities that own
+them; that link, together with archetypes and queries, is not implemented
+yet.
