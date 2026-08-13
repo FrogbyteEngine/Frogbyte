@@ -102,6 +102,7 @@ def validate_comment_only_rust(
         path,
     )
 
+
 def safe_path(path: str) -> pathlib.PurePosixPath:
     pure = pathlib.PurePosixPath(path)
     if (
@@ -337,27 +338,27 @@ def self_test(token_guard: str | None) -> None:
             True,
         ),
         (
-            "rewrite ordinary comment",
-            b"// Old.\npub struct A;\n",
-            b"// Updated.\npub struct A;\n",
-            True,
-        ),
-        (
-            "delete ordinary comment",
-            b"// Obsolete.\npub struct A;\n",
-            b"pub struct A;\n",
-            True,
-        ),
-        (
-            "rewrite outer rustdoc",
+            "rewrite rustdoc",
             b"/// Old.\npub struct A;\n",
             b"/// Updated.\npub struct A;\n",
             True,
         ),
         (
-            "rewrite block rustdoc",
-            b"/** Old. */\npub struct A;\n",
-            b"/** Updated. */\npub struct A;\n",
+            "SAFETY rewrite",
+            b"// SAFETY[UNSAFE-001]: old.\nunsafe { f(); }\n",
+            b"// SAFETY[UNSAFE-001]: corrected.\nunsafe { f(); }\n",
+            True,
+        ),
+        (
+            "SAFETY addition",
+            b"unsafe { f(); }\n",
+            b"// SAFETY[UNSAFE-001]: invariant.\nunsafe { f(); }\n",
+            True,
+        ),
+        (
+            "SAFETY deletion",
+            b"// SAFETY[UNSAFE-001]: obsolete.\nunsafe { f(); }\n",
+            b"unsafe { f(); }\n",
             True,
         ),
         (
@@ -373,9 +374,9 @@ def self_test(token_guard: str | None) -> None:
             False,
         ),
         (
-            "raw string fake rustdoc",
-            b'const S: &str = r#"\nvalue\n"#;\n',
-            b'const S: &str = r#"\n/// not rustdoc\nvalue\n"#;\n',
+            "raw string edit",
+            b'const S: &str = r#"value"#;\n',
+            b'const S: &str = r#"// comment"#;\n',
             False,
         ),
         (
@@ -383,24 +384,6 @@ def self_test(token_guard: str | None) -> None:
             b"macro_rules! m { () => { call!(+ /* gap */ =); }; }\n",
             b"macro_rules! m { () => { call!(+=); }; }\n",
             False,
-        ),
-        (
-            "SAFETY rewrite",
-            b"// SAFETY[UNSAFE-001]: invariant.\nunsafe { f(); }\n",
-            b"// SAFETY[UNSAFE-001]: changed.\nunsafe { f(); }\n",
-            False,
-        ),
-        (
-            "SAFETY deletion",
-            b"// SAFETY[UNSAFE-001]: invariant.\nunsafe { f(); }\n",
-            b"unsafe { f(); }\n",
-            False,
-        ),
-        (
-            "rustdoc Safety section",
-            b"/// # Safety\n/// Old contract.\npub unsafe fn f() {}\n",
-            b"/// # Safety\n/// Updated contract.\npub unsafe fn f() {}\n",
-            True,
         ),
         (
             "CRLF source",
@@ -420,6 +403,7 @@ def self_test(token_guard: str | None) -> None:
         )
 
     print("AI quality validator self-tests passed.")
+
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()

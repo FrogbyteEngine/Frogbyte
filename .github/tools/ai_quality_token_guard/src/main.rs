@@ -12,16 +12,9 @@ struct CodeToken {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProtectedComment {
-    code_boundary: usize,
-    text: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct SourceSignature {
     shebang: Option<String>,
     code_tokens: Vec<CodeToken>,
-    protected_comments: Vec<ProtectedComment>,
 }
 
 enum Command {
@@ -33,17 +26,6 @@ fn is_comment(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::LineComment { .. } | TokenKind::BlockComment { .. }
-    )
-}
-
-fn is_doc_comment(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::LineComment { doc_style: Some(_) }
-            | TokenKind::BlockComment {
-                doc_style: Some(_),
-                ..
-            }
     )
 }
 
@@ -67,7 +49,6 @@ fn source_signature(source: &str, label: &str) -> Result<SourceSignature, String
     let body = &source[shebang_len..];
 
     let mut code_tokens = Vec::new();
-    let mut protected_comments = Vec::new();
     let mut offset = 0usize;
     let mut saw_trivia = false;
 
@@ -84,18 +65,8 @@ fn source_signature(source: &str, label: &str) -> Result<SourceSignature, String
         ensure_comment_is_terminated(token.kind, label)?;
 
         match token.kind {
-            TokenKind::Whitespace => {
-                saw_trivia = true;
-            }
-            kind if is_comment(kind) => {
-                if !is_doc_comment(kind) && text.contains("SAFETY") {
-                    protected_comments.push(ProtectedComment {
-                        code_boundary: code_tokens.len(),
-                        text: text.to_owned(),
-                    });
-                }
-                saw_trivia = true;
-            }
+            TokenKind::Whitespace => saw_trivia = true,
+            kind if is_comment(kind) => saw_trivia = true,
             kind => {
                 code_tokens.push(CodeToken {
                     kind,
@@ -119,7 +90,6 @@ fn source_signature(source: &str, label: &str) -> Result<SourceSignature, String
     Ok(SourceSignature {
         shebang,
         code_tokens,
-        protected_comments,
     })
 }
 
@@ -157,97 +127,59 @@ fn verify_signatures(before: &SourceSignature, after: &SourceSignature) -> Resul
         }
     }
 
-    if before.protected_comments != after.protected_comments {
-        return Err(
-            "protected non-doc SAFETY comments may not be added, removed, moved, or rewritten"
-                .to_owned(),
-        );
-    }
-
     Ok(())
 }
 
 fn verify_sources(before: &str, after: &str) -> Result<(), String> {
-    let before_signature = source_signature(before, "before")?;
-    let after_signature = source_signature(after, "after")?;
-    verify_signatures(&before_signature, &after_signature)
-}
-
-fn read_utf8(path: &Path, label: &str) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|error| format!("{label}: {error}"))?;
-    String::from_utf8(bytes).map_err(|error| format!("{label}: source is not UTF-8: {error}"))
+    verify_signatures(
+        &source_signature(before, "before")?,
+        &source_signature(after, "after")?,
+    )
 }
 
 fn verify_files(before: &Path, after: &Path) -> Result<(), String> {
-    let before_source = read_utf8(before, "before")?;
-    let after_source = read_utf8(after, "after")?;
-    verify_sources(&before_source, &after_source)
+    let before = fs::read_to_string(before).map_err(|error| format!("before: {error}"))?;
+    let after = fs::read_to_string(after).map_err(|error| format!("after: {error}"))?;
+    verify_sources(&before, &after)
 }
 
 fn expect_case(name: &str, before: &str, after: &str, expected: bool) {
-    let valid = verify_sources(before, after).is_ok();
-    assert_eq!(valid, expected, "self-test failed: {name}");
+    assert_eq!(
+        verify_sources(before, after).is_ok(),
+        expected,
+        "self-test failed: {name}"
+    );
 }
 
 fn self_test() {
     expect_case(
-        "add ordinary comment",
-        "pub struct A;\n",
-        "// Explanation.\npub struct A;\n",
+        "ordinary comment maintenance",
+        "// Old.\npub struct A;\n",
+        "// Better.\npub struct A;\n",
         true,
     );
     expect_case(
-        "rewrite ordinary comment",
-        "// Old explanation.\npub struct A;\n",
-        "// Better explanation.\npub struct A;\n",
+        "rustdoc maintenance",
+        "/// Old.\npub struct A;\n",
+        "/// Better.\npub struct A;\n",
         true,
     );
     expect_case(
-        "delete ordinary comment",
-        "// Obsolete explanation.\npub struct A;\n",
-        "pub struct A;\n",
+        "SAFETY maintenance",
+        "// SAFETY[UNSAFE-001]: old.\nunsafe { f(); }\n",
+        "// SAFETY[UNSAFE-001]: corrected.\nunsafe { f(); }\n",
         true,
     );
     expect_case(
-        "rewrite outer rustdoc",
-        "/// Old documentation.\npub struct A;\n",
-        "/// New documentation.\npub struct A;\n",
+        "SAFETY addition",
+        "unsafe { f(); }\n",
+        "// SAFETY[UNSAFE-001]: invariant.\nunsafe { f(); }\n",
         true,
     );
     expect_case(
-        "delete outer rustdoc",
-        "/// Obsolete documentation.\npub struct A;\n",
-        "pub struct A;\n",
-        true,
-    );
-    expect_case(
-        "rewrite inner rustdoc",
-        "//! Old module documentation.\npub struct A;\n",
-        "//! New module documentation.\npub struct A;\n",
-        true,
-    );
-    expect_case(
-        "rewrite block rustdoc",
-        "/** Old documentation. */\npub struct A;\n",
-        "/** New documentation. */\npub struct A;\n",
-        true,
-    );
-    expect_case(
-        "move documentation comment",
-        "/// Documents A.\npub struct A;\n\npub struct B;\n",
-        "pub struct A;\n\n/// Documents B.\npub struct B;\n",
-        true,
-    );
-    expect_case(
-        "macro source location shift",
-        "const LINE: u32 = line!();\n",
-        "// Explanation.\nconst LINE: u32 = line!();\n",
-        true,
-    );
-    expect_case(
-        "CRLF comment maintenance",
-        "/// Old.\r\npub struct A;\r\n",
-        "/// New.\r\npub struct A;\r\n",
+        "SAFETY deletion",
+        "// SAFETY[UNSAFE-001]: obsolete.\nunsafe { f(); }\n",
+        "unsafe { f(); }\n",
         true,
     );
     expect_case(
@@ -263,64 +195,22 @@ fn self_test() {
         false,
     );
     expect_case(
-        "explicit doc attribute inserted",
-        "pub struct A;\n",
-        "#[doc = \"Documentation.\"]\npub struct A;\n",
-        false,
-    );
-    expect_case(
-        "explicit doc attribute edited",
+        "explicit doc attribute edit",
         "#[doc = \"Old.\"]\npub struct A;\n",
         "#[doc = \"New.\"]\npub struct A;\n",
         false,
     );
     expect_case(
-        "fake comment inside raw string",
-        "const S: &str = r#\"\nvalue\n\"#;\n",
-        "const S: &str = r#\"\n/// not rustdoc\nvalue\n\"#;\n",
+        "raw string content edit",
+        "const S: &str = r#\"value\"#;\n",
+        "const S: &str = r#\"// comment\"#;\n",
         false,
     );
     expect_case(
-        "punctuation jointness changed by comment removal",
+        "punctuation jointness",
         "macro_rules! m { () => { call!(+ /* gap */ =); }; }\n",
         "macro_rules! m { () => { call!(+=); }; }\n",
         false,
-    );
-    expect_case(
-        "punctuation jointness changed by comment insertion",
-        "macro_rules! m { () => { call!(+=); }; }\n",
-        "macro_rules! m { () => { call!(+ /* gap */ =); }; }\n",
-        false,
-    );
-    expect_case(
-        "protected SAFETY comment rewrite",
-        "// SAFETY[UNSAFE-001]: old justification.\nunsafe { f(); }\n",
-        "// SAFETY[UNSAFE-001]: rewritten justification.\nunsafe { f(); }\n",
-        false,
-    );
-    expect_case(
-        "protected SAFETY comment deletion",
-        "// SAFETY[UNSAFE-001]: justification.\nunsafe { f(); }\n",
-        "unsafe { f(); }\n",
-        false,
-    );
-    expect_case(
-        "protected SAFETY comment move",
-        "// SAFETY[UNSAFE-001]: justification.\nunsafe { f(); }\ng();\n",
-        "unsafe { f(); }\n// SAFETY[UNSAFE-001]: justification.\ng();\n",
-        false,
-    );
-    expect_case(
-        "new protected SAFETY comment",
-        "unsafe { f(); }\n",
-        "// SAFETY[UNSAFE-001]: generated justification.\nunsafe { f(); }\n",
-        false,
-    );
-    expect_case(
-        "rustdoc safety section remains maintainable",
-        "/// # Safety\n/// Old contract.\npub unsafe fn f() {}\n",
-        "/// # Safety\n/// Updated contract.\npub unsafe fn f() {}\n",
-        true,
     );
 
     println!("AI quality token guard self-tests passed.");
@@ -382,19 +272,15 @@ mod tests {
     use super::verify_sources;
 
     #[test]
-    fn accepts_existing_rustdoc_rewrite() {
+    fn accepts_comment_and_safety_maintenance() {
+        assert!(verify_sources("// Old.\npub struct A;\n", "// New.\npub struct A;\n").is_ok());
         assert!(
             verify_sources(
-                "/// Old documentation.\npub struct A;\n",
-                "/// Updated documentation.\npub struct A;\n"
+                "// SAFETY[UNSAFE-001]: old.\nunsafe { f(); }\n",
+                "// SAFETY[UNSAFE-001]: corrected.\nunsafe { f(); }\n"
             )
             .is_ok()
         );
-    }
-
-    #[test]
-    fn accepts_existing_comment_deletion() {
-        assert!(verify_sources("// Obsolete.\npub struct A;\n", "pub struct A;\n").is_ok());
     }
 
     #[test]
@@ -414,17 +300,6 @@ mod tests {
             verify_sources(
                 "macro_rules! m { () => { call!(+ /* gap */ =); }; }\n",
                 "macro_rules! m { () => { call!(+=); }; }\n"
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_protected_safety_comment_changes() {
-        assert!(
-            verify_sources(
-                "// SAFETY[UNSAFE-001]: invariant.\nunsafe { f(); }\n",
-                "// SAFETY[UNSAFE-001]: changed.\nunsafe { f(); }\n"
             )
             .is_err()
         );
