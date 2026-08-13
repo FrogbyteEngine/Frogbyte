@@ -1,18 +1,23 @@
 //! Benchmarks for the type-erased component storage and the generic storage it
 //! replaces.
 //!
-//! Insertion and removal are measured for both `BlobVec` and the generic
-//! storage kept under `support::generic_storage_baseline`, so those groups
-//! expose a `blobvec` and a `generic_baseline` id over the same component
-//! counts. Comparing the two ids of a group shows what the type-erased storage
-//! costs relative to a monomorphized container under an identical workload.
+//! Insertion, removal, and release are measured for both `BlobVec` and the
+//! generic storage kept under `support::generic_storage_baseline`, so those
+//! groups expose a `blobvec` and a `generic_baseline` id over the same
+//! component counts. The two ids of a group run the same workload from the
+//! same logical state, so their difference reports what the current storage
+//! costs relative to the one it replaced. That difference is not attributable
+//! to type erasure alone: the two implementations also grow their buffer and
+//! move components differently.
 //!
 //! Element access is measured for `BlobVec` only, because the retained baseline
 //! exposes no accessor API.
 //!
-//! The mutating workloads keep their storage as Criterion batch state and
+//! Most mutating workloads keep their storage as Criterion batch state and
 //! operate on it through a reference, so populating a storage is measured only
-//! where that is the workload, while releasing it afterwards never is.
+//! where that is the workload, while releasing it afterwards is not. The
+//! release group is the deliberate exception: it takes the storage by value so
+//! that destruction is the measured operation.
 //!
 //! Batch state scales with the component count, so the populated workloads use
 //! `BatchSize::LargeInput` to bound how much of it Criterion keeps alive at
@@ -76,6 +81,12 @@ fn populated_baseline(count: usize) -> GenericStorageBaseline<Position> {
 ///
 /// Both implementations start empty, so the measurement covers each growth
 /// strategy and its reallocations together with the per-component write.
+///
+/// The baseline buffer is allocated when the storage is constructed, so that
+/// first allocation falls into setup, while `BlobVec` allocates lazily on the
+/// first insertion and pays for it inside the measurement. The gap is one
+/// allocation out of the growth sequence and matters most at the smallest
+/// count.
 fn bench_push(c: &mut Criterion) {
     let mut group = c.benchmark_group("component_storage_push");
 
@@ -351,6 +362,57 @@ fn bench_sequential_write(c: &mut Criterion) {
     group.finish();
 }
 
+/// Releasing a populated storage, as when a component storage is discarded
+/// whole instead of being emptied one component at a time.
+///
+/// Population happens in setup and the storage is taken by value, so the
+/// measurement covers destroying every stored component plus the single
+/// deallocation. This is the one lifecycle stage the other groups deliberately
+/// keep out of their measurement, and it scales with the component count:
+/// `BlobVec` stores the drop function chosen at construction and calls it once
+/// per stored component, whichever component type it holds. The baseline
+/// destroys the same components through a statically known type, so the two ids
+/// bracket what erasing the component type costs on release. `Position` has no
+/// destructor, which is the case where the two release paths have the most room
+/// to differ.
+fn bench_drop_populated(c: &mut Criterion) {
+    let mut group = c.benchmark_group("component_storage_drop");
+
+    for &count in &COMPONENT_COUNTS {
+        group.throughput(Throughput::Elements(count as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("blobvec", format!("{count}_components")),
+            &count,
+            |b, &count| {
+                // The routine consumes the storage, so its destructor runs
+                // inside the measured region. Returning the storage instead
+                // would move that work after the timer stops, because Criterion
+                // releases batch outputs outside the measurement.
+                b.iter_batched(
+                    || populated_blob_vec(count),
+                    drop::<BlobVec>,
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("generic_baseline", format!("{count}_components")),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || populated_baseline(count),
+                    drop::<GenericStorageBaseline<Position>>,
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     component_storage_benches,
     bench_push,
@@ -359,5 +421,6 @@ criterion_group!(
     bench_steady_state_churn,
     bench_sequential_read,
     bench_sequential_write,
+    bench_drop_populated,
 );
 criterion_main!(component_storage_benches);
