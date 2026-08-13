@@ -21,6 +21,12 @@ For every quality task:
 5. Review the complete generated diff adversarially before finishing.
 6. Remove weak, redundant, misleading, speculative, or unnecessary work.
 
+Discovering that an existing artifact is misleading or methodologically invalid
+is not resolved by documenting the limitation.
+
+When the allowed scope permits it, correct the artifact or stop presenting it
+as valid or directly comparable before adding new coverage.
+
 Producing no change is a valid result when the existing artifacts are already
 sufficient or the allowed scope cannot improve them safely.
 
