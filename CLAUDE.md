@@ -137,10 +137,13 @@ Never modify non-comment Rust syntax, identifiers, literals, punctuation,
 attributes, or token boundaries. Do not add or edit explicit `#[doc = ...]` or
 `#![doc = ...]` attributes.
 
-Existing non-doc comments containing `SAFETY` are protected annotations. Never
-add, delete, move, or rewrite them during `agent:docs`. Rustdoc `# Safety`
-sections are ordinary API documentation and may be maintained when the pull
-request changes the documented safety contract.
+The agent may add new `SAFETY[...]` comments immediately before unsafe
+operations when required to document the invariant that makes the operation
+sound. New safety comments must explain the relevant memory-safety invariant
+rather than merely restating the operation.
+
+Rustdoc `# Safety` sections are ordinary API documentation and may be maintained
+when the pull request changes the documented safety contract.
 
 Do not intentionally change program behavior.
 
@@ -313,8 +316,9 @@ Before finishing:
 3. Verify no forbidden file was modified.
 4. Verify `agent:tests` edits are confined to `crates/*/tests/**`.
 5. Verify `agent:docs` Rust edits modify only comments/whitespace in Rust
-   files already changed by the pull request, and do not alter protected
-   non-doc `SAFETY` annotations.
+   files already changed by the pull request, preserve or update if neccessary
+   existing non-doc `SAFETY` annotations, and add new `SAFETY[...]` comments 
+   only where they document an unsafe operation.
 6. Verify `agent:docs` prose files are confined to `docs/api/**` or directly
    relevant crate `README.md` files.
 7. Verify benchmark edits are confined to `crates/*/benches/**`, existing
