@@ -1,63 +1,59 @@
-//! Benchmarks comparing the contiguous type-erased component storage
-//! [`BlobVec`] with the retained generic storage baseline.
+//! Benchmarks for contiguous component storage operations.
 //!
-//! Every comparison group runs the same logical workload on both storages from
-//! the same logical starting state, so a reported difference is the cost of
-//! type erasure plus the cost of the growth strategy: [`BlobVec`] reallocates a
-//! single buffer and can keep it in place, while the baseline allocates a new
-//! buffer and moves every element into it.
+//! Direct comparisons use the retained generic storage as a reference.
+//! Both implementations enter each measured comparison from equivalent
+//! logical states.
 //!
-//! The batched workloads keep their storage as Criterion batch state and
-//! operate on it through a reference, so building the initial population and
-//! releasing the storage afterwards stay outside measurement. Only the baseline
-//! allocates in its constructor, so its first single-slot allocation is the one
-//! growth step that setup absorbs; every later growth of either storage is
-//! measured.
+//! The push benchmark deliberately prepares both empty storages with capacity
+//! for one component before timing begins. The initial allocation is therefore
+//! excluded symmetrically, and every measured growth step starts from the same
+//! capacity.
 //!
-//! Batch state scales with the component count, so the batched workloads use
-//! `BatchSize::LargeInput` to bound how much of it Criterion keeps alive at
-//! once.
-//!
-//! The baseline exposes no component accessor, so the shared-access sweep
-//! covers the type-erased storage alone and is deliberately not reported as a
-//! comparison.
+//! Population for removal benchmarks is setup work and remains outside the
+//! measurement. The shared-access benchmark is BlobVec-only because the
+//! retained baseline exposes no equivalent accessor.
 
 mod support;
 
 use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use frogbyte_ecs::component::{blobvec::BlobVec, position_component::Position};
+use frogbyte_ecs::component::{Component, blobvec::BlobVec};
 
 use crate::support::generic_storage_baseline::GenericStorageBaseline;
 
-/// Component counts covering a small, medium, and large column.
-///
-/// At the largest count the stored components no longer fit in a typical L1
-/// data cache, so the workloads also report how each storage behaves once the
-/// column is walked from slower memory.
+#[derive(Clone, Copy)]
+struct BenchComponent([u64; 2]);
+
+impl Component for BenchComponent {}
+
 const COMPONENT_COUNTS: [usize; 3] = [128, 1_024, 8_192];
 
-/// Builds the component stored at `index`.
-///
-/// Values differ per element so a workload cannot be reduced to writing one
-/// constant repeatedly.
-fn component_at(index: usize) -> Position {
-    let base = index as f32;
-
-    Position {
-        x: base,
-        y: base + 1.0,
-        z: base + 2.0,
-    }
+fn component_at(index: usize) -> BenchComponent {
+    let value = index as u64;
+    BenchComponent([value, !value])
 }
 
-/// Creates a type-erased storage holding `count` components.
+fn input_components(count: usize) -> Vec<BenchComponent> {
+    (0..count).map(component_at).collect()
+}
+
+/// Returns an empty BlobVec whose initial one-element allocation has already
+/// happened.
 ///
-/// Shared setup for the workloads that measure operations over an existing
-/// column; it always runs outside the measured routine.
+/// `push` followed by `pop` leaves the logical length at zero while retaining
+/// the first allocation, matching `GenericStorageBaseline::new`.
+fn warmed_empty_blobvec() -> BlobVec {
+    let mut storage = BlobVec::new::<BenchComponent>();
+
+    storage.push(component_at(0));
+    let _ = storage.pop::<BenchComponent>();
+
+    storage
+}
+
 fn populated_blobvec(count: usize) -> BlobVec {
-    let mut storage = BlobVec::new::<Position>();
+    let mut storage = BlobVec::new::<BenchComponent>();
 
     for index in 0..count {
         storage.push(component_at(index));
@@ -66,9 +62,7 @@ fn populated_blobvec(count: usize) -> BlobVec {
     storage
 }
 
-/// Creates a baseline storage holding `count` components, matching the state
-/// [`populated_blobvec`] produces.
-fn populated_baseline(count: usize) -> GenericStorageBaseline<Position> {
+fn populated_baseline(count: usize) -> GenericStorageBaseline<BenchComponent> {
     let mut storage = GenericStorageBaseline::new();
 
     for index in 0..count {
@@ -78,41 +72,47 @@ fn populated_baseline(count: usize) -> GenericStorageBaseline<Position> {
     storage
 }
 
-/// Appending components into an empty storage, which is how a component column
-/// is built and therefore pays every reallocation on the way.
+/// Measures appending a complete column after both storages already own their
+/// first one-element allocation.
 ///
-/// This is where the two growth strategies differ, so the group reports the
-/// per-push cost together with the cost of moving the existing components
-/// whenever the buffer has to grow.
-fn bench_push_fill(c: &mut Criterion) {
+/// This isolates the push path and subsequent growth strategies without giving
+/// either implementation a hidden initial-allocation advantage.
+fn bench_push_growth(c: &mut Criterion) {
     let mut group = c.benchmark_group("component_storage_push");
 
     for &count in &COMPONENT_COUNTS {
         group.throughput(Throughput::Elements(count as u64));
+
         group.bench_with_input(
             BenchmarkId::new("blobvec", format!("{count}_components")),
             &count,
             |b, &count| {
                 b.iter_batched_ref(
-                    BlobVec::new::<Position>,
-                    |storage| {
-                        for index in 0..count {
-                            storage.push(black_box(component_at(index)));
+                    || (warmed_empty_blobvec(), input_components(count)),
+                    |(storage, values)| {
+                        for &value in values.iter() {
+                            storage.push(black_box(value));
                         }
                     },
                     BatchSize::LargeInput,
                 );
             },
         );
+
         group.bench_with_input(
             BenchmarkId::new("generic_baseline", format!("{count}_components")),
             &count,
             |b, &count| {
                 b.iter_batched_ref(
-                    GenericStorageBaseline::<Position>::new,
-                    |storage| {
-                        for index in 0..count {
-                            storage.push(black_box(component_at(index)));
+                    || {
+                        (
+                            GenericStorageBaseline::<BenchComponent>::new(),
+                            input_components(count),
+                        )
+                    },
+                    |(storage, values)| {
+                        for &value in values.iter() {
+                            storage.push(black_box(value));
                         }
                     },
                     BatchSize::LargeInput,
@@ -124,17 +124,16 @@ fn bench_push_fill(c: &mut Criterion) {
     group.finish();
 }
 
-/// Draining a full column from the end, which is the cost of removing the last
-/// component without moving any other component.
+/// Measures removing an existing column from the end.
 ///
-/// It is the reference point for the swap-removal workload below: the
-/// difference between the two reports what filling the resulting hole costs,
-/// rather than leaving that cost mixed into a single removal number.
+/// Population and destruction of the batch state are setup/teardown concerns;
+/// the measured operation is only the sequence of `pop` calls.
 fn bench_pop_drain(c: &mut Criterion) {
     let mut group = c.benchmark_group("component_storage_pop");
 
     for &count in &COMPONENT_COUNTS {
         group.throughput(Throughput::Elements(count as u64));
+
         group.bench_with_input(
             BenchmarkId::new("blobvec", format!("{count}_components")),
             &count,
@@ -143,13 +142,14 @@ fn bench_pop_drain(c: &mut Criterion) {
                     || populated_blobvec(count),
                     |storage| {
                         for _ in 0..count {
-                            black_box(storage.pop::<Position>());
+                            black_box(storage.pop::<BenchComponent>());
                         }
                     },
                     BatchSize::LargeInput,
                 );
             },
         );
+
         group.bench_with_input(
             BenchmarkId::new("generic_baseline", format!("{count}_components")),
             &count,
@@ -170,18 +170,17 @@ fn bench_pop_drain(c: &mut Criterion) {
     group.finish();
 }
 
-/// Removing every component from the front with a swap removal, which is the
-/// despawn path: each removal moves the current last component into the hole so
-/// the column stays contiguous.
+/// Measures repeatedly removing index zero from a populated column.
 ///
-/// Removing at index zero keeps the moved component far from the removed one,
-/// so the workload touches both ends of the column instead of the best case
-/// where the removed element is already the last one.
+/// Each operation moves the current final component into the vacated first
+/// slot, exercising the non-trivial swap-remove path rather than the
+/// last-element fast case.
 fn bench_swap_remove_drain(c: &mut Criterion) {
     let mut group = c.benchmark_group("component_storage_swap_remove");
 
     for &count in &COMPONENT_COUNTS {
         group.throughput(Throughput::Elements(count as u64));
+
         group.bench_with_input(
             BenchmarkId::new("blobvec", format!("{count}_components")),
             &count,
@@ -190,13 +189,14 @@ fn bench_swap_remove_drain(c: &mut Criterion) {
                     || populated_blobvec(count),
                     |storage| {
                         for _ in 0..count {
-                            black_box(storage.swap_remove::<Position>(0));
+                            black_box(storage.swap_remove::<BenchComponent>(0));
                         }
                     },
                     BatchSize::LargeInput,
                 );
             },
         );
+
         group.bench_with_input(
             BenchmarkId::new("generic_baseline", format!("{count}_components")),
             &count,
@@ -217,28 +217,27 @@ fn bench_swap_remove_drain(c: &mut Criterion) {
     group.finish();
 }
 
-/// Sweeping shared access across a whole column, the read pattern a system
-/// performs when it iterates its components in order.
+/// Measures sequential shared access through BlobVec's type-erased accessor.
 ///
-/// Every access re-checks the stored type identifier and the length, so this
-/// reports the per-component cost of type-erased access together with the
-/// memory traffic of walking the column.
+/// This is intentionally not compared with the generic baseline because that
+/// retained implementation has no equivalent public benchmark accessor.
 fn bench_get_sweep(c: &mut Criterion) {
     let mut group = c.benchmark_group("component_storage_get_sweep");
 
     for &count in &COMPONENT_COUNTS {
-        // Shared access does not mutate the storage, so the same population is
-        // reused across iterations instead of being rebuilt per iteration.
         let storage = populated_blobvec(count);
 
         group.throughput(Throughput::Elements(count as u64));
+
         group.bench_with_input(
             BenchmarkId::new("blobvec", format!("{count}_components")),
             &storage,
             |b, storage| {
                 b.iter(|| {
                     for index in 0..count {
-                        black_box(storage.get::<Position>(index));
+                        if let Some(value) = storage.get::<BenchComponent>(index) {
+                            black_box(value.0);
+                        }
                     }
                 });
             },
@@ -250,7 +249,7 @@ fn bench_get_sweep(c: &mut Criterion) {
 
 criterion_group!(
     component_storage_benches,
-    bench_push_fill,
+    bench_push_growth,
     bench_pop_drain,
     bench_swap_remove_drain,
     bench_get_sweep,

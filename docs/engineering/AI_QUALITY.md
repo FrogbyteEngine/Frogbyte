@@ -77,7 +77,7 @@ Prioritize:
 Avoid narrating obvious code or promoting incidental implementation details to
 stable guarantees.
 
-`SAFETY[UNSAFE-XXX]` comments must explain why the associated unsafe operation
+`SAFETY: [UNSAFE-XXX]` comments must explain why the associated unsafe operation
 is sound: the relevant invariant, precondition, ownership rule, alignment,
 initialization, lifetime, or aliasing fact. They may be added, corrected,
 relocated, or removed when the code or its safety reasoning changes.
