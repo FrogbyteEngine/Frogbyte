@@ -59,9 +59,10 @@ It must not modify production source files.
 If required behavior cannot be tested without changing production code or
 adding a dependency, make no test change and explain why.
 
-Existing tests may be consolidated or removed only when stale, invalid,
-misleading, or strictly redundant after a stronger replacement. Do not reduce
-meaningful behavioral coverage.
+Generated tests, or tests already modified by the pull request, may be
+consolidated or removed only when stale, invalid, misleading, or strictly
+redundant after a stronger replacement. Do not reduce meaningful behavioral
+coverage.
 
 ### Documentation fallback scope
 
@@ -213,10 +214,9 @@ For project-authored `unsafe` code:
 - check that the unsafe boundary is small and internal where practical;
 - check that a safe abstraction prevents safe callers from violating the safety
   contract;
-- require a stable Safety Review identifier such as `UNSAFE-001` when repository
-  policy requires one;
+- require a stable Safety Review identifier such as `UNSAFE-001`;
 - require a precise `SAFETY[UNSAFE-XXX]` comment at every project-authored unsafe
-  operation when repository policy requires one;
+  operation;
 - require a Rustdoc `# Safety` section on every unsafe function or trait;
 - review alignment, initialization, aliasing, lifetimes, ownership,
   invalidation, exactly-once drop, and thread-safety assumptions;

@@ -275,45 +275,38 @@ Miri complements the normal test suite; it does not replace it.
 
 Workflow: `.github/workflows/ai_quality.yml`
 
-AI Quality is an opt-in pull request automation used to generate or maintain quality artifacts after implementation work exists.
+AI Quality is an opt-in pull request workflow for generating and maintaining
+quality artifacts after implementation work exists.
 
-It is triggered by applying one of these labels:
+It is triggered by these labels:
 
 - `agent:tests`;
 - `agent:docs`;
 - `agent:benchmarks`.
 
-Only one AI Quality run may modify a pull request branch at a time. Additional label-triggered runs for the same pull request remain queued so tests, documentation, and benchmarks can be requested together without racing each other.
+Only one AI Quality run may modify a pull request branch at a time. Additional
+label-triggered runs for the same pull request are queued.
 
-### Shared quality policy
+### Responsibilities
 
-Generated-artifact quality is defined in:
+The workflow deliberately separates quality rules from permissions and
+mechanical validation:
 
-```text
-docs/engineering/AI_QUALITY_POLICY.md
-```
+- `docs/engineering/AI_QUALITY.md` defines what useful tests, documentation, and
+  benchmarks look like;
+- `CLAUDE.md` defines Claude's writable scopes and privileged-workflow rules;
+- `AGENTS.md` defines Codex review behavior and quota-fallback permissions;
+- `.github/scripts/validate_ai_quality.py` validates task path scope;
+- `.github/tools/ai_quality_token_guard/` validates comment-only Rust source
+  edits for `agent:docs`.
 
-Claude-specific permissions and task scopes are defined in:
+This keeps artifact-quality guidance in one shared policy instead of repeating
+it in the workflow prompt.
 
-```text
-CLAUDE.md
-```
-
-Codex review and fallback permissions are defined in:
-
-```text
-AGENTS.md
-```
-
-The shared policy favors high-signal artifacts over quantity. Generation begins by identifying concrete gaps in tests, documentation, or benchmarks and ends with an adversarial self-review that removes weak, redundant, misleading, or speculative output.
-
-The policy is intentionally general rather than being tied to a particular ECS type, pull request, or previously observed generation mistake.
-
-### Trusted policy source
+### Trusted execution model
 
 AI Quality uses `pull_request_target` because the workflow requires credentials.
-
-The workspace root is checked out from the trusted base branch. `CLAUDE.md`, `AGENTS.md`, the shared quality policy, the trusted validator, and the Rust token guard therefore come from the trusted base commit rather than the pull request head.
+The workspace root is therefore checked out from the trusted base branch.
 
 The pull request head is checked out separately under:
 
@@ -321,146 +314,87 @@ The pull request head is checked out separately under:
 pr-head/
 ```
 
-and is treated as untrusted data.
+and is treated as untrusted data. Pull-request-controlled project code is never
+executed in the privileged job.
 
-A pull request that changes `CLAUDE.md`, `AGENTS.md`, `docs/engineering/AI_QUALITY_POLICY.md`, or the AI Quality workflow does not change the trusted instructions used by its own already-running `pull_request_target` job. Those changes become active for later AI Quality runs after they are merged into the trusted base branch.
+Claude may inspect and edit the isolated snapshot within the selected task
+scope, but must not run Cargo, tests, benchmarks, formatters, linters, build
+scripts, proc macros, project binaries, or commands derived from pull request
+contents.
 
-The completion comment records the trusted base commit used as the quality-policy source so this behavior remains visible during debugging.
+The trusted `CLAUDE.md`, shared AI quality policy, validator, and token guard
+come from the base commit. A pull request changing those files does not change
+the trusted rules used by its own run; the new rules become active after merge.
 
 ### Claude generation
 
-Claude is the primary generation agent.
-
-All three tasks use a maximum of:
+Claude is the normal quality-generation agent. Every task has a maximum budget
+of:
 
 ```text
 40 turns
 ```
 
-The benchmark task continues to use the configured higher-reasoning model settings while tests and documentation use the normal model selection.
+Before editing, Claude inspects the pull request intent, linked issue, changed
+implementation, existing relevant quality artifacts, and relevant review
+feedback. It then follows the shared quality policy and performs an adversarial
+self-review before finishing.
 
-Claude must read the trusted `CLAUDE.md` and shared quality policy before editing.
+Producing no change is valid when no useful in-scope improvement exists.
 
-The privileged job never executes pull-request-controlled project code. Claude must not run Cargo, tests, benchmarks, formatters, linters, build scripts, proc macros, project binaries, or other commands derived from pull request contents.
-
-Existing GitHub CI remains the deterministic execution and validation authority after generated changes are published.
-
-### Test generation scope
-
-`agent:tests` may modify only:
+Task scopes are:
 
 ```text
-crates/*/tests/**
+agent:tests       crates/*/tests/**
+agent:benchmarks  crates/*/benches/**
 ```
 
-The agent may add, improve, consolidate, or remove integration tests when doing so improves signal without reducing meaningful behavioral coverage.
+`agent:docs` may maintain comments and Rustdoc in Rust source files already
+changed by the pull request, directly relevant touched-crate `README.md` files,
+and `docs/api/**`.
 
-Tests are evaluated by regression value rather than test count. Each retained generated test should target a distinct useful contract, invariant, boundary, state transition, or realistic failure path.
+Rust documentation edits may add, rewrite, move, or remove comments, including
+`SAFETY[UNSAFE-XXX]` comments. The token guard requires all non-comment Rust
+tokens and their lexical separation to remain unchanged.
 
-### Documentation generation scope
+The guard proves source-token integrity, not that documentation or safety
+reasoning is semantically correct. Normal review remains required.
 
-`agent:docs` may modify:
+### Trusted audit and publication
 
-- Rust source files already changed by the pull request under `crates/*/src/**/*.rs`, but only comments and whitespace;
-- directly relevant touched-crate `README.md` files;
-- `docs/api/**`.
+Claude does not stage, commit, push, create branches, or alter Git history.
 
-It may not modify governance or engineering policy documentation.
+After generation, trusted workflow steps validate the generated paths, run the
+Rust token guard when required, verify that the pull request head did not change,
+create one commit, and push it to the existing pull request branch.
 
-The trusted Rust token guard compares source before and after documentation generation. Every non-comment Rust token kind and exact lexeme must remain unchanged, in the same order, with the same lexical separation from adjacent code tokens.
+If the pull request head changes while generation is running, publication fails
+closed rather than overwriting newer work.
 
-Comments are maintainable documentation. This includes non-doc `SAFETY` comments, which may be added, rewritten, moved, or removed when required to keep the safety explanation correct after the pull request changes code.
+The privileged job does not execute project validation. After publication, the
+normal GitHub CI workflows validate the resulting revision.
 
-The token guard does not attempt to prove that a SAFETY explanation is semantically correct. It proves only that executable Rust tokens were not changed. The shared policy, Claude self-review, optional Codex review, normal CI, and human review remain responsible for the quality of the safety reasoning.
+### Codex
 
-Rustdoc can still affect source locations and is visible to macros as `doc` attributes. These effects remain outside the mechanical token-integrity guarantee.
+Codex remains the independent pull request reviewer under the rules in
+`AGENTS.md`. Generated tests, documentation, and benchmarks are reviewed as
+first-class pull request changes against the same shared AI quality standard.
 
-### Benchmark generation scope
-
-`agent:benchmarks` may modify only:
-
-```text
-crates/*/benches/**
-```
-
-The agent may maintain existing benchmarks instead of always appending new ones.
-
-Benchmarks must begin with a meaningful performance question. Direct comparisons must perform equivalent logical work from equivalent logical starting states, and setup or teardown must not be hidden for only one side of a comparison.
-
-Criterion iteration method, batch size, throughput, representative input scales, and benchmark identity must be chosen deliberately according to the shared quality policy.
-
-### Trusted audit and publish
-
-Claude does not own Git history or repository publication.
-
-After generation, a trusted workflow step:
-
-1. verifies the trusted validator hash;
-2. validates that every generated path belongs to the task scope;
-3. runs the trusted Rust token guard for Rust documentation changes;
-4. verifies that the pull request head did not change while generation was running;
-5. creates one deterministic commit;
-6. pushes that commit to the existing pull request branch.
-
-If the pull request head changes during generation, publication fails closed rather than overwriting newer work.
-
-### Conditional Codex quality review
-
-Claude returns a structured `codex_review_recommended` boolean after its adversarial self-review.
-
-A read-only Codex second pass is requested only when independent judgment is likely to add meaningful value, such as:
-
-- SAFETY comment maintenance;
-- a direct comparative benchmark;
-- a non-obvious benchmark measurement boundary;
-- generated tests based on ambiguous or underspecified behavior;
-- unresolved uncertainty after self-review.
-
-The trusted workflow also detects changed `SAFETY` lines mechanically and requests a Codex quality review even if Claude forgot to recommend one.
-
-The review handoff uses:
-
-```text
-FROGBYTE_QUALITY_REVIEW
-```
-
-This mode is advisory and read-only. Codex reviews the generated commit against `AGENTS.md` and the shared quality policy but must not modify files, push commits, approve, merge, enable auto-merge, or change pull request state.
-
-A failed optional Codex quality-review handoff does not invalidate an otherwise successfully published Claude generation. Normal CI and human review can continue.
-
-### Claude quota fallback
-
-Codex generation fallback remains separate from the optional read-only quality review.
-
-Fallback is triggered only when the workflow confidently classifies Claude's failure as included-usage quota exhaustion.
-
-A normal Claude error or configured turn-limit failure does not trigger generation fallback.
-
-The fallback handoff uses:
+AI Quality uses Codex as a writer only for the existing explicit quota fallback:
 
 ```text
 FROGBYTE_QUALITY_FALLBACK
 ```
 
-In fallback mode Codex may write only within the task-specific scope defined in `AGENTS.md`.
+The fallback is triggered only when the workflow confidently identifies Claude
+included-usage quota exhaustion. Normal Claude failures and the configured
+40-turn limit do not trigger it.
 
-The asynchronous documentation fallback may not modify Rust source because it does not pass through the trusted local Rust token guard.
+Fallback writes remain limited to the task-specific scopes in `AGENTS.md`.
+Documentation fallback cannot edit Rust source because the asynchronous Codex
+path does not pass through the trusted local Rust token guard.
 
-### Validation after generation
-
-The privileged AI job does not claim that local project validation passed.
-
-After a generated commit is pushed, normal GitHub Actions validate the resulting pull request revision.
-
-The AI Quality completion comment reports:
-
-- files changed;
-- local validation as not run in the privileged AI job;
-- CI validation as pending after push or not applicable;
-- whether an advisory Codex quality review was requested;
-- the trusted base commit used as the quality-policy source.
-
-AI-generated quality artifacts do not replace human review and do not grant merge authority to either Claude or Codex.
+Human maintainers remain responsible for approval and merge decisions.
 
 ## Pull request policy
 
