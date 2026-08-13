@@ -43,7 +43,7 @@ jobs:
 
     env:
       QUALITY_TASK: ${{ github.event.label.name }}
-      CLAUDE_MAX_TURNS: '40'
+      CLAUDE_MAX_TURNS: '60'
 
     steps:
       - name: Check command label is still active
