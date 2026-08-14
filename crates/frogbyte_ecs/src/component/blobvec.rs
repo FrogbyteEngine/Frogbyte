@@ -100,11 +100,7 @@ impl BlobVec {
     pub fn new<T: Component + 'static>() -> Self {
         Self {
             ptr: NonNull::<T>::dangling().cast::<u8>(),
-            capacity: if size_of::<T>() == 0 {
-                usize::MAX
-            } else {
-                0
-            },
+            capacity: if size_of::<T>() == 0 { usize::MAX } else { 0 },
             len: 0,
             layout: Layout::new::<T>(),
             type_id: TypeId::of::<T>(),
@@ -113,12 +109,8 @@ impl BlobVec {
     }
 
     /// Doubles the backing capacity, starting at one element.
-    fn grow(&mut self) {        
-        assert_ne!(
-            self.layout.size(),
-            0,
-            "BlobVec ZST capacity overflow"
-        );
+    fn grow(&mut self) {
+        assert_ne!(self.layout.size(), 0, "BlobVec ZST capacity overflow");
 
         let new_capacity = if self.capacity == 0 {
             1
@@ -129,7 +121,7 @@ impl BlobVec {
         };
 
         let (new_layout, _) = Layout::repeat(&self.layout, new_capacity)
-                                        .expect("Error: BlobVec layout must remain valid");
+            .expect("Error: BlobVec layout must remain valid");
 
         let new_ptr = if self.capacity == 0 {
             // SAFETY: [UNSAFE-004] `grow` is only used for non-ZST storage, so
