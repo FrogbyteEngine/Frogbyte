@@ -14,11 +14,11 @@ use crate::component::Component;
 ///
 /// - `len <= capacity`.
 /// - Elements in `0..len` are initialized.
-/// - `layout`, `type_id`, and `drop_fn` all describe the type used at creation.
-/// - When `capacity > 0`, `ptr` refers to storage for `capacity` elements.
-///
-/// Zero-sized components are not handled correctly by the current allocation
-/// strategy and must be addressed before they can be safely supported.
+/// - `layout`, `type_id`, and `drop_fn` describe the type used at creation.
+/// - For non-ZST components, `capacity > 0` means `ptr` references the
+///   corresponding allocation.
+/// - For ZST components, `capacity == usize::MAX` and `ptr` is a
+///   correctly aligned dangling pointer; no allocation is performed.
 pub struct BlobVec {
     ptr: NonNull<u8>,
     capacity: usize,
@@ -28,28 +28,69 @@ pub struct BlobVec {
     drop_fn: unsafe fn(*mut u8),
 }
 
-impl Drop for BlobVec {
-    fn drop(&mut self) {
-        for index in 0..self.len {
-            // SAFETY: [UNSAFE-001] `index` is in the initialized prefix and
-            // element offsets follow the layout recorded at construction.
-            let data = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() };
+struct DropGuard {
+    ptr: NonNull<u8>,
+    next: usize,
+    len: usize,
+    capacity: usize,
+    layout: Layout,
+    drop_fn: unsafe fn(*mut u8),
+}
 
-            // SAFETY: [UNSAFE-002] `drop_fn` matches the stored component type,
-            // and `data` points to one of its initialized values.
-            unsafe {
-                (self.drop_fn)(data);
-            }
+impl DropGuard {
+    fn drop_next(&mut self) {
+        let index = self.next;
+
+        // Advance first so this element is never dropped twice if its
+        // destructor panics.
+        self.next += 1;
+
+        // SAFETY: `index` belonged to the initialized prefix before `next`
+        // was advanced, and offsets follow the stored component layout.
+        let data = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() };
+
+        // SAFETY: `drop_fn` matches the stored component type and `data`
+        // identifies the initialized value being removed from the prefix.
+        unsafe {
+            (self.drop_fn)(data);
+        }
+    }
+}
+
+impl Drop for DropGuard {
+    fn drop(&mut self) {
+        while self.next < self.len {
+            self.drop_next();
         }
 
         if self.capacity != 0 && self.layout.size() != 0 {
-            let (total_layout, _) = self.layout.repeat(self.capacity).unwrap();
+            let (total_layout, _) = self
+                .layout
+                .repeat(self.capacity)
+                .expect("BlobVec allocation layout must remain valid");
 
-            // SAFETY: [UNSAFE-003] For non-ZST components, `ptr` was allocated
-            // with the same repeated layout. ZSTs are a known unsound case.
+            // SAFETY: Non-ZST storage was allocated with this repeated layout
+            // and all initialized elements have now been dropped.
             unsafe {
                 dealloc(self.ptr.as_ptr(), total_layout);
             }
+        }
+    }
+}
+
+impl Drop for BlobVec {
+    fn drop(&mut self) {
+        let mut guard = DropGuard {
+            ptr: self.ptr,
+            next: 0,
+            len: self.len,
+            capacity: self.capacity,
+            layout: self.layout,
+            drop_fn: self.drop_fn,
+        };
+
+        while guard.next < guard.len {
+            guard.drop_next();
         }
     }
 }
@@ -58,7 +99,7 @@ impl BlobVec {
     /// Creates empty storage for components of type `T`.
     pub fn new<T: Component + 'static>() -> Self {
         Self {
-            ptr: NonNull::dangling(),
+            ptr: NonNull::<T>::dangling().cast::<u8>(),
             capacity: if size_of::<T>() == 0 {
                 usize::MAX
             } else {
@@ -73,6 +114,12 @@ impl BlobVec {
 
     /// Doubles the backing capacity, starting at one element.
     fn grow(&mut self) {        
+        assert_ne!(
+            self.layout.size(),
+            0,
+            "BlobVec ZST capacity overflow"
+        );
+
         let new_capacity = if self.capacity == 0 {
             1
         } else {
@@ -81,22 +128,22 @@ impl BlobVec {
                 .expect("Error: BlobVec max size capacity reached.")
         };
 
-        let (new_layout, _) = Layout::repeat(&self.layout, new_capacity).unwrap();
+        let (new_layout, _) = Layout::repeat(&self.layout, new_capacity)
+                                        .expect("Error: BlobVec layout must remain valid");
 
         let new_ptr = if self.capacity == 0 {
-            // SAFETY: [UNSAFE-004] `new_layout` is the layout for the new
-            // allocation. Its size must be non-zero; ZSTs currently violate
-            // that requirement and require separate handling.
+            // SAFETY: [UNSAFE-004] `grow` is only used for non-ZST storage, so
+            // `new_layout` has non-zero size and is valid for allocation.
             unsafe { alloc(new_layout) }
         } else {
             let (old_layout, _) = self.layout.repeat(self.capacity).unwrap();
-            let old_ptr = self.ptr.as_ptr() as *mut u8;
+            let old_ptr = self.ptr.as_ptr();
             // SAFETY: [UNSAFE-005] `old_ptr` was allocated with `old_layout`,
             // and `new_layout` preserves the element alignment while growing.
             unsafe { realloc(old_ptr, old_layout, new_layout.size()) }
         };
 
-        self.ptr = match NonNull::new(new_ptr as *mut u8) {
+        self.ptr = match NonNull::new(new_ptr) {
             Some(p) => p,
             None => handle_alloc_error(new_layout),
         };
