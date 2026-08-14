@@ -19,3 +19,7 @@ criterion = "0.8.2"
 [[bench]]
 name = "entity_allocator"
 harness = false
+
+[[bench]]
+name = "component_storage"
+harness = false

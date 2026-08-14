@@ -332,7 +332,7 @@ Claude is the normal quality-generation agent. Every task has a maximum budget
 of:
 
 ```text
-40 turns
+60 turns
 ```
 
 Before editing, Claude inspects the pull request intent, linked issue, changed
@@ -354,7 +354,7 @@ changed by the pull request, directly relevant touched-crate `README.md` files,
 and `docs/api/**`.
 
 Rust documentation edits may add, rewrite, move, or remove comments, including
-`SAFETY[UNSAFE-XXX]` comments. The token guard requires all non-comment Rust
+`SAFETY: [UNSAFE-XXX]` comments. The token guard requires all non-comment Rust
 tokens and their lexical separation to remain unchanged.
 
 The guard proves source-token integrity, not that documentation or safety

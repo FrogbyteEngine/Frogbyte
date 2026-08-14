@@ -21,6 +21,12 @@ For every quality task:
 5. Review the complete generated diff adversarially before finishing.
 6. Remove weak, redundant, misleading, speculative, or unnecessary work.
 
+Discovering that an existing artifact is misleading or methodologically invalid
+is not resolved by documenting the limitation.
+
+When the allowed scope permits it, correct the artifact or stop presenting it
+as valid or directly comparable before adding new coverage.
+
 Producing no change is a valid result when the existing artifacts are already
 sufficient or the allowed scope cannot improve them safely.
 
@@ -71,7 +77,7 @@ Prioritize:
 Avoid narrating obvious code or promoting incidental implementation details to
 stable guarantees.
 
-`SAFETY[UNSAFE-XXX]` comments must explain why the associated unsafe operation
+`SAFETY: [UNSAFE-XXX]` comments must explain why the associated unsafe operation
 is sound: the relevant invariant, precondition, ownership rule, alignment,
 initialization, lifetime, or aliasing fact. They may be added, corrected,
 relocated, or removed when the code or its safety reasoning changes.

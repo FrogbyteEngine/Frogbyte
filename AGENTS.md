@@ -215,7 +215,7 @@ For project-authored `unsafe` code:
 - check that a safe abstraction prevents safe callers from violating the safety
   contract;
 - require a stable Safety Review identifier such as `UNSAFE-001`;
-- require a precise `SAFETY[UNSAFE-XXX]` comment at every project-authored unsafe
+- require a precise `SAFETY: [UNSAFE-XXX]` comment at every project-authored unsafe
   operation;
 - require a Rustdoc `# Safety` section on every unsafe function or trait;
 - review alignment, initialization, aliasing, lifetimes, ownership,
