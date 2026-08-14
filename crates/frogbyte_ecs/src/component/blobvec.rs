@@ -128,7 +128,10 @@ impl BlobVec {
             // `new_layout` has non-zero size and is valid for allocation.
             unsafe { alloc(new_layout) }
         } else {
-            let (old_layout, _) = self.layout.repeat(self.capacity).unwrap();
+            let (old_layout, _) = self
+                .layout
+                .repeat(self.capacity)
+                .expect("Error: BlobVec layout must remain valid");
             let old_ptr = self.ptr.as_ptr();
             // SAFETY: [UNSAFE-005] `old_ptr` was allocated with `old_layout`,
             // and `new_layout` preserves the element alignment while growing.
