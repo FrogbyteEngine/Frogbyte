@@ -332,7 +332,7 @@ Claude is the normal quality-generation agent. Every task has a maximum budget
 of:
 
 ```text
-40 turns
+60 turns
 ```
 
 Before editing, Claude inspects the pull request intent, linked issue, changed

@@ -41,16 +41,19 @@ impl DropGuard {
     fn drop_next(&mut self) {
         let index = self.next;
 
-        // Advance first so this element is never dropped twice if its
-        // destructor panics.
+        // Advance before dropping so unwinding resumes with the next element
+        // instead of attempting to drop this one twice.
         self.next += 1;
 
-        // SAFETY: `index` belonged to the initialized prefix before `next`
-        // was advanced, and offsets follow the stored component layout.
+        // SAFETY: [UNSAFE-001] `index` was inside the initialized range before
+        // `next` was advanced, and `ptr` is correctly aligned for the stored
+        // component type. For ZSTs the offset is zero and the aligned dangling
+        // pointer remains valid for the type-erased destructor.
         let data = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() };
 
-        // SAFETY: `drop_fn` matches the stored component type and `data`
-        // identifies the initialized value being removed from the prefix.
+        // SAFETY: [UNSAFE-002] `drop_fn` was created for the component type
+        // described by `layout`, and `data` identifies one initialized value
+        // that has not previously been dropped or moved out.
         unsafe {
             (self.drop_fn)(data);
         }
@@ -69,8 +72,9 @@ impl Drop for DropGuard {
                 .repeat(self.capacity)
                 .expect("BlobVec allocation layout must remain valid");
 
-            // SAFETY: Non-ZST storage was allocated with this repeated layout
-            // and all initialized elements have now been dropped.
+            // SAFETY: [UNSAFE-003] Non-ZST storage was allocated using this
+            // repeated layout, every initialized element has now been dropped,
+            // and `ptr` has not been deallocated yet.
             unsafe {
                 dealloc(self.ptr.as_ptr(), total_layout);
             }
@@ -158,10 +162,14 @@ impl BlobVec {
             self.grow();
         }
 
-        // SAFETY: [UNSAFE-006] After growth, `len < capacity`, and the type
-        // check guarantees this slot has the layout of `T`.
+        // SAFETY: [UNSAFE-006] For non-ZSTs, `len < capacity` identifies an
+        // uninitialized slot inside the allocation. For ZSTs, `ptr` is a correctly
+        // aligned dangling pointer and the offset is zero. The type check guarantees
+        // the resulting pointer has the layout of `T`.
         let ptr = (unsafe { self.ptr.add(self.layout.size() * self.len).as_ptr() }) as *mut T;
-        // SAFETY: [UNSAFE-007] `ptr` addresses the next uninitialized slot.
+        // SAFETY: [UNSAFE-007] `ptr` is correctly aligned for `T` and represents the
+        // next logical storage slot. Writing transfers ownership of `value` into the
+        // initialized prefix.
         unsafe { ptr.write(value) };
 
         self.len += 1;
@@ -181,11 +189,11 @@ impl BlobVec {
 
         self.len -= 1;
 
-        // SAFETY: [UNSAFE-008] The decremented length identifies the previous
-        // last initialized slot, whose type was checked above.
+        // SAFETY: [UNSAFE-008] The decremented length identifies the previous last
+        // initialized value, and the type check guarantees the pointer has type `T`
         let raw_value = unsafe { self.ptr.add(self.len * self.layout.size()).as_ptr() } as *mut T;
-        // SAFETY: [UNSAFE-009] The value is moved out after its slot has been
-        // removed from the initialized prefix.
+        // SAFETY: [UNSAFE-009] The slot has already been removed from the initialized
+        // prefix, so moving its value out cannot cause BlobVec to drop it again.
         Some(unsafe { raw_value.read() })
     }
 
@@ -202,22 +210,24 @@ impl BlobVec {
 
         self.len -= 1;
 
-        // SAFETY: [UNSAFE-010] `index` was checked against the previous length
-        // and therefore identifies an initialized `T`.
+        // SAFETY: [UNSAFE-010] `index` was checked against the previous length, so it
+        // identifies an initialized value of the type verified above.
         let ptr_to_remove = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() as *mut T };
-        // SAFETY: [UNSAFE-011] The value is moved out of the initialized slot.
+        // SAFETY: [UNSAFE-011] The value is moved out of an initialized slot that will
+        // either remain vacant or receive the previous last value below.
         let value_to_remove = unsafe { ptr_to_remove.read() };
 
         if self.len != index {
-            // SAFETY: [UNSAFE-012] The new length identifies the previous last
-            // initialized slot, distinct from the removed slot.
+            // SAFETY: [UNSAFE-012] The new length identifies the previous last initialized
+            // value. When this branch runs, that slot is distinct from `index`.
             let raw_data_to_swap =
                 unsafe { self.ptr.add(self.len * self.layout.size()).as_ptr() as *mut T };
-            // SAFETY: [UNSAFE-013] The previous last value is moved out after
-            // its slot leaves the initialized prefix.
+            // SAFETY: [UNSAFE-013] The previous last slot has left the initialized prefix,
+            // so moving its value out cannot cause it to be dropped twice.
             let value_to_swap = unsafe { raw_data_to_swap.read() };
-            // SAFETY: [UNSAFE-014] `ptr_to_remove` is now a vacant in-bounds
-            // slot and receives the moved last value.
+            // SAFETY: [UNSAFE-014] `ptr_to_remove` is the vacant in-bounds slot created by
+            // moving out the removed value, so writing the previous last value restores
+            // the initialized `0..len` prefix.
             unsafe { ptr_to_remove.write(value_to_swap) };
         }
 
@@ -236,11 +246,12 @@ impl BlobVec {
             return None;
         }
 
-        // SAFETY: [UNSAFE-015] `index < len`, and the type check guarantees
-        // that the initialized slot contains a `T`.
+        // SAFETY: [UNSAFE-015] `index < len`, so the slot is initialized, and the
+        // type check guarantees that the stored value is a `T`.
         let raw_data = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() as *const T };
-        // SAFETY: [UNSAFE-016] `raw_data` points to a live initialized `T`
-        // covered by the shared borrow of `self`.
+        // SAFETY: [UNSAFE-016] `raw_data` is non-null, correctly aligned and points to
+        // a live initialized `T`. The shared borrow of `self` prevents mutable access
+        // through this BlobVec for the lifetime of the returned reference.
         Some(unsafe { &*raw_data })
     }
 
@@ -258,11 +269,12 @@ impl BlobVec {
             return None;
         }
 
-        // SAFETY: [UNSAFE-017] `index < len`, and the type check guarantees
-        // that the initialized slot contains a `T`.
+        // SAFETY: [UNSAFE-017] `index < len`, so the slot is initialized, and the
+        // type check guarantees that the stored value is a `T`.
         let raw_data = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() } as *mut T;
-        // SAFETY: [UNSAFE-018] The mutable borrow of `self` provides exclusive
-        // access to the referenced component.
+        // SAFETY: [UNSAFE-018] `raw_data` is non-null, correctly aligned and points to
+        // a live initialized `T`. Borrowing `self` mutably provides exclusive access
+        // to the returned component for the reference lifetime.
         Some(unsafe { &mut *raw_data })
     }
 
@@ -272,8 +284,9 @@ impl BlobVec {
     ///
     /// `ptr` must point to a live, properly aligned and initialized `T`.
     unsafe fn drop_value<T: Component + 'static>(ptr: *mut u8) {
-        // SAFETY: [UNSAFE-019] Guaranteed by the caller of this type-erased
-        // destructor.
+        // SAFETY: [UNSAFE-019] The caller guarantees that `ptr` identifies a live,
+        // correctly aligned and initialized value of `T` that must be dropped exactly
+        // once.
         unsafe {
             ptr.cast::<T>().drop_in_place();
         }
