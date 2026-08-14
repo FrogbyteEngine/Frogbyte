@@ -42,7 +42,7 @@ impl Drop for BlobVec {
             }
         }
 
-        if self.capacity != 0 {
+        if self.capacity != 0 && self.layout.size() != 0 {
             let (total_layout, _) = self.layout.repeat(self.capacity).unwrap();
 
             // SAFETY: [UNSAFE-003] For non-ZST components, `ptr` was allocated
@@ -59,7 +59,11 @@ impl BlobVec {
     pub fn new<T: Component + 'static>() -> Self {
         Self {
             ptr: NonNull::dangling(),
-            capacity: 0,
+            capacity: if size_of::<T>() == 0 {
+                usize::MAX
+            } else {
+                0
+            },
             len: 0,
             layout: Layout::new::<T>(),
             type_id: TypeId::of::<T>(),
@@ -68,7 +72,7 @@ impl BlobVec {
     }
 
     /// Doubles the backing capacity, starting at one element.
-    fn grow(&mut self) {
+    fn grow(&mut self) {        
         let new_capacity = if self.capacity == 0 {
             1
         } else {

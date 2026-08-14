@@ -66,7 +66,7 @@ For `agent:docs`, modify only:
 
 Rust source edits are comment-and-whitespace maintenance only. Comments and
 Rustdoc may be added, updated, moved, or removed when needed, including
-`SAFETY[UNSAFE-XXX]` comments.
+`SAFETY: [UNSAFE-XXX]` comments.
 
 Never change non-comment Rust tokens, identifiers, literals, punctuation,
 attributes, or token boundaries. Do not add or edit explicit `#[doc = ...]` or
