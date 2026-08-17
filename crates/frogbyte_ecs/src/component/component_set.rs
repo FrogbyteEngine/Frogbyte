@@ -5,6 +5,7 @@ use crate::component::{Component, blobvec::{BlobVec}};
 pub trait ComponentSet {
     fn type_ids() -> Vec<TypeId>;
     fn push_into(self, columns: &mut [BlobVec]);
+    fn create_column() -> Vec<BlobVec>;
 }
 
 macro_rules! ComponentSet_tuple_impl {
@@ -35,9 +36,22 @@ macro_rules! ComponentSet_tuple_impl {
                     column.push($T);
                 )+
             }
+
+            fn create_column() -> Vec<BlobVec> {
+                let mut columns = vec![
+                    $(BlobVec::new::<$T>()),+
+                ];
+
+                columns.sort_unstable_by_key(|column| column.type_id());
+                columns
+            }
         }
     };  
 }
 
 ComponentSet_tuple_impl!(A,);
 ComponentSet_tuple_impl!(A, B,);
+ComponentSet_tuple_impl!(A, B, C,);
+ComponentSet_tuple_impl!(A, B, C, D);
+ComponentSet_tuple_impl!(A, B, C, D, E);
+ComponentSet_tuple_impl!(A, B, C, D, E, F);
