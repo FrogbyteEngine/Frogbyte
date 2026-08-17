@@ -1,9 +1,7 @@
 //! Contiguous, type-erased storage for components of a single type.
 
 use std::{
-    alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc},
-    any::TypeId,
-    ptr::NonNull,
+    alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc}, any::TypeId, ptr::{self, NonNull},
 };
 
 use crate::component::Component;
@@ -232,6 +230,28 @@ impl BlobVec {
         }
 
         value_to_remove
+    }
+
+    pub fn swap_remove_drop(&mut self, index: usize) {
+        assert!(index < self.len);
+
+
+        let ptr_to_remove = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() };
+        unsafe { ptr_to_remove.read() };
+        
+        self.len -= 1;
+
+        unsafe { (self.drop_fn)(ptr_to_remove) };
+
+
+        if self.len != index {
+            let raw_data_to_swap =
+                unsafe { self.ptr.add(self.len * self.layout.size()).as_ptr() as *const u8};
+
+
+            unsafe { ptr::copy(raw_data_to_swap, ptr_to_remove, self.layout.size()) };
+
+        }
     }
 
     /// Returns the component at `index`, or `None` when out of bounds.

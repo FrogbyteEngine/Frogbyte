@@ -4,7 +4,7 @@ use crate::{component::{Component, blobvec::BlobVec, component_set::ComponentSet
 
 pub struct Archetype {
     key: ArchetypeKey,
-    column: Vec<BlobVec>,
+    columns: Vec<BlobVec>,
     entities: Vec<Entity>,
 }
 
@@ -30,7 +30,7 @@ impl Archetype {
     pub fn new<T:ComponentSet>() -> Self {
         Self {
             key: ArchetypeKey::new(T::type_ids()),
-            column: T::create_column(),
+            columns: T::create_column(),
             entities: Vec::new(),
         }
     }
@@ -43,7 +43,7 @@ impl Archetype {
             "ComponentSet does not match Archetype",
         );
 
-        components.push_into(&mut self.column);
+        components.push_into(&mut self.columns);
         self.entities.push(entity);
     }
 
@@ -54,16 +54,42 @@ impl Archetype {
             .binary_search(&TypeId::of::<C>())
             .expect("Error: TypeId of this component does not exist in blobvec");
 
-        &self.column[column_index].get(row_index).expect("Error: Cannot get component at the corresponding index")
+        &self.columns[column_index].get(row_index).expect("Error: Cannot get component at the corresponding index")
     }
 
     pub fn get_mut<C: Component + 'static>(&mut self, row_index: usize) -> &mut C {
-         let column_index = self
+        let column_index = self
             .key
             .components
             .binary_search(&TypeId::of::<C>())
             .expect("Error: TypeId of this component does not exist in blobvec");
 
-        self.column[column_index].get_mut(row_index).expect("Error: Cannot get component at the corresponding index")
+        self.columns[column_index].get_mut(row_index).expect("Error: Cannot get component at the corresponding index")
+    }
+
+    pub fn swap_remove(&mut self, row_index: usize) -> Option<Entity> {
+        assert!(row_index < self.entities.len());
+
+        for column in self.columns.iter_mut() {
+            column.swap_remove_drop(row_index);
+        }
+
+        self.entities.swap_remove(row_index);
+
+        if row_index >= self.entities.len() {
+            return None;
+        }
+
+        Some(self.entities[row_index])
+
+        
+
+        // let column_index = self
+        //     .key
+        //     .components
+        //     .binary_search(&TypeId::of::<C>())
+        //     .expect("Error: TypeId of this component does not exist in blobvec");
+
+        // self.columns[column_index].swap_remove(index)
     }
 }
