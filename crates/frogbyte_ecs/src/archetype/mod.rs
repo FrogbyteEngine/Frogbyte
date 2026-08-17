@@ -51,10 +51,19 @@ impl Archetype {
         let column_index = self
             .key
             .components
-            .iter()
-            .position(|&id| TypeId::of::<C>() == id)
+            .binary_search(&TypeId::of::<C>())
             .expect("Error: TypeId of this component does not exist in blobvec");
-        
-        &self.column[column_index].get(row_index).unwrap() as &C
+
+        &self.column[column_index].get(row_index).expect("Error: Cannot get component at the corresponding index")
+    }
+
+    pub fn get_mut<C: Component + 'static>(&mut self, row_index: usize) -> &mut C {
+         let column_index = self
+            .key
+            .components
+            .binary_search(&TypeId::of::<C>())
+            .expect("Error: TypeId of this component does not exist in blobvec");
+
+        self.column[column_index].get_mut(row_index).expect("Error: Cannot get component at the corresponding index")
     }
 }
