@@ -1,6 +1,6 @@
-use std::{any::{ TypeId}, collections::HashMap};
+use std::{any::TypeId, ops::Index};
 
-use crate::{component::{Component, blobvec::BlobVec, component_set::ComponentSet}, entity::{self, Entity}};
+use crate::{component::{Component, blobvec::BlobVec, component_set::ComponentSet}, entity::Entity};
 
 pub struct Archetype {
     key: ArchetypeKey,
@@ -45,7 +45,16 @@ impl Archetype {
 
         components.push_into(&mut self.column);
         self.entities.push(entity);
-    } 
+    }
+
+    pub fn get<C: Component + 'static>(&self, row_index: usize) -> &C {
+        let column_index = self
+            .key
+            .components
+            .iter()
+            .position(|&id| TypeId::of::<C>() == id)
+            .expect("Error: TypeId of this component does not exist in blobvec");
+        
+        &self.column[column_index].get(row_index).unwrap() as &C
+    }
 }
-
-
