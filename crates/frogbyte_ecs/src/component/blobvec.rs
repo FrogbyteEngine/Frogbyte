@@ -278,6 +278,10 @@ impl BlobVec {
         Some(unsafe { &mut *raw_data })
     }
 
+    pub fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
     /// Drops the value at `ptr` as a `T`.
     ///
     /// # Safety
