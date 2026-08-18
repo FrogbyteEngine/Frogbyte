@@ -1,6 +1,9 @@
 use std::{alloc::dealloc, any::TypeId, ops::Index};
 
-use crate::{component::{Component, blobvec::BlobVec, component_set::ComponentSet}, entity::Entity};
+use crate::{
+    component::{Component, blobvec::BlobVec, component_set::ComponentSet},
+    entity::Entity,
+};
 
 pub struct Archetype {
     key: ArchetypeKey,
@@ -8,7 +11,7 @@ pub struct Archetype {
     entities: Vec<Entity>,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ArchetypeKey {
     components: Vec<TypeId>,
 }
@@ -49,12 +52,14 @@ impl ArchetypeKey {
             "Archetype cannot contain duplicate component types",
         );
 
-        Self { components: component_ids }
+        Self {
+            components: component_ids,
+        }
     }
 }
 
 impl Archetype {
-    pub fn new<T:ComponentSet>() -> Self {
+    pub fn new<T: ComponentSet>() -> Self {
         Self {
             key: ArchetypeKey::new(T::type_ids()),
             columns: T::create_column(),
@@ -81,7 +86,9 @@ impl Archetype {
             .binary_search(&TypeId::of::<C>())
             .expect("Error: TypeId of this component does not exist in blobvec");
 
-        &self.columns[column_index].get(row_index).expect("Error: Cannot get component at the corresponding index")
+        &self.columns[column_index]
+            .get(row_index)
+            .expect("Error: Cannot get component at the corresponding index")
     }
 
     pub fn get_mut<C: Component + 'static>(&mut self, row_index: usize) -> &mut C {
@@ -91,7 +98,9 @@ impl Archetype {
             .binary_search(&TypeId::of::<C>())
             .expect("Error: TypeId of this component does not exist in blobvec");
 
-        self.columns[column_index].get_mut(row_index).expect("Error: Cannot get component at the corresponding index")
+        self.columns[column_index]
+            .get_mut(row_index)
+            .expect("Error: Cannot get component at the corresponding index")
     }
 
     pub fn swap_remove(&mut self, row_index: usize) -> Option<Entity> {
@@ -101,14 +110,12 @@ impl Archetype {
             pending_drop: Vec::with_capacity(self.columns.len()),
             next: 0,
         };
-        
+
         for column in self.columns.iter_mut() {
-            drop_guard.pending_drop.push(
-                PendingDrop {
-                    ptr: column.raw_swap_remove(row_index),
-                    drop_fn:  column.drop_fn(),
-                }
-            );
+            drop_guard.pending_drop.push(PendingDrop {
+                ptr: column.raw_swap_remove(row_index),
+                drop_fn: column.drop_fn(),
+            });
         }
 
         self.entities.swap_remove(row_index);

@@ -1,4 +1,4 @@
 pub mod blobvec;
-pub mod position_component;
 pub mod component_set;
+pub mod position_component;
 pub trait Component {}

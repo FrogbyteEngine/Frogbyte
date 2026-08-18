@@ -1,6 +1,6 @@
-use std::any::{TypeId};
+use std::any::TypeId;
 
-use crate::component::{Component, blobvec::{BlobVec}};
+use crate::component::{Component, blobvec::BlobVec};
 
 pub trait ComponentSet {
     fn type_ids() -> Vec<TypeId>;
@@ -42,12 +42,12 @@ macro_rules! ComponentSet_tuple_impl {
             fn push_into(self, columns: &mut [BlobVec]) {
                 let ($($T,)+) = self;
 
-                $( 
+                $(
                     let column = columns
                         .iter_mut()
                         .find(|column| column.type_id() == TypeId::of::<$T>())
                         .expect("Error: Component column must exist in Archetype");
-                
+
                     column.push($T);
                 )+
             }
@@ -61,7 +61,7 @@ macro_rules! ComponentSet_tuple_impl {
                 columns
             }
         }
-    };  
+    };
 }
 
 ComponentSet_tuple_impl!();

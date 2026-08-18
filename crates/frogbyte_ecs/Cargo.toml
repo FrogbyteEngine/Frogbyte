@@ -23,3 +23,7 @@ harness = false
 [[bench]]
 name = "component_storage"
 harness = false
+
+[[bench]]
+name = "archetype"
+harness = false

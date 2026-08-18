@@ -1,7 +1,9 @@
 //! Contiguous, type-erased storage for components of a single type.
 
 use std::{
-    alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc}, any::TypeId, ptr::{self, NonNull},
+    alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc},
+    any::TypeId,
+    ptr::{self, NonNull},
 };
 
 use crate::component::Component;
@@ -237,11 +239,13 @@ impl BlobVec {
 
         let ptr_to_remove = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() };
         let raw_data_to_swap =
-            unsafe { self.ptr.add((self.len -1) * self.layout.size()).as_ptr()};
+            unsafe { self.ptr.add((self.len - 1) * self.layout.size()).as_ptr() };
 
-        if self.len -1 != index {
-            unsafe { ptr::swap_nonoverlapping(raw_data_to_swap, ptr_to_remove, self.layout.size()) };
-        } 
+        if self.len - 1 != index {
+            unsafe {
+                ptr::swap_nonoverlapping(raw_data_to_swap, ptr_to_remove, self.layout.size())
+            };
+        }
 
         self.len -= 1;
 
