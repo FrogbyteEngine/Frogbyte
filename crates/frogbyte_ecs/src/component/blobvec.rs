@@ -235,23 +235,16 @@ impl BlobVec {
     pub fn swap_remove_drop(&mut self, index: usize) {
         assert!(index < self.len);
 
-
         let ptr_to_remove = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() };
-        unsafe { ptr_to_remove.read() };
-        
+        let raw_data_to_swap =
+            unsafe { self.ptr.add((self.len -1) * self.layout.size()).as_ptr()};
+
+        if self.len -1 != index {
+            unsafe { ptr::swap_nonoverlapping(raw_data_to_swap, ptr_to_remove, self.layout.size()) };
+        } 
+
         self.len -= 1;
-
-        unsafe { (self.drop_fn)(ptr_to_remove) };
-
-
-        if self.len != index {
-            let raw_data_to_swap =
-                unsafe { self.ptr.add(self.len * self.layout.size()).as_ptr() as *const u8};
-
-
-            unsafe { ptr::copy(raw_data_to_swap, ptr_to_remove, self.layout.size()) };
-
-        }
+        unsafe { (self.drop_fn)(raw_data_to_swap) };
     }
 
     /// Returns the component at `index`, or `None` when out of bounds.
