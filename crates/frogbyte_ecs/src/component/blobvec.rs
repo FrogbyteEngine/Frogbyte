@@ -232,7 +232,7 @@ impl BlobVec {
         value_to_remove
     }
 
-    pub fn swap_remove_drop(&mut self, index: usize) {
+    pub(crate) fn raw_swap_remove(&mut self, index: usize) -> *mut u8 {
         assert!(index < self.len);
 
         let ptr_to_remove = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() };
@@ -244,7 +244,9 @@ impl BlobVec {
         } 
 
         self.len -= 1;
-        unsafe { (self.drop_fn)(raw_data_to_swap) };
+
+        raw_data_to_swap
+        //unsafe { (self.drop_fn)(raw_data_to_swap) };
     }
 
     /// Returns the component at `index`, or `None` when out of bounds.
@@ -293,6 +295,10 @@ impl BlobVec {
 
     pub fn type_id(&self) -> TypeId {
         self.type_id
+    }
+
+    pub(crate) fn drop_fn(&self) -> unsafe fn(*mut u8) {
+        self.drop_fn
     }
 
     /// Drops the value at `ptr` as a `T`.

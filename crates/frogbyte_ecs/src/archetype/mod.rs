@@ -1,4 +1,4 @@
-use std::{any::TypeId, ops::Index};
+use std::{alloc::dealloc, any::TypeId, ops::Index};
 
 use crate::{component::{Component, blobvec::BlobVec, component_set::ComponentSet}, entity::Entity};
 
@@ -11,6 +11,33 @@ pub struct Archetype {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ArchetypeKey {
     components: Vec<TypeId>,
+}
+
+pub struct DropGuard {
+    pending_drop: Vec<PendingDrop>,
+    next: usize,
+}
+pub struct PendingDrop {
+    ptr: *mut u8,
+    drop_fn: unsafe fn(*mut u8),
+}
+
+impl DropGuard {
+    fn drop_next(&mut self) {
+        let index = self.next;
+
+        self.next += 1;
+
+        unsafe { (self.pending_drop[index].drop_fn)(self.pending_drop[index].ptr) };
+    }
+}
+
+impl Drop for DropGuard {
+    fn drop(&mut self) {
+        while self.next < self.pending_drop.len() {
+            self.drop_next();
+        }
+    }
 }
 
 impl ArchetypeKey {
@@ -70,26 +97,30 @@ impl Archetype {
     pub fn swap_remove(&mut self, row_index: usize) -> Option<Entity> {
         assert!(row_index < self.entities.len());
 
+        let mut drop_guard = DropGuard {
+            pending_drop: Vec::with_capacity(self.columns.len()),
+            next: 0,
+        };
+        
         for column in self.columns.iter_mut() {
-            column.swap_remove_drop(row_index);
+            drop_guard.pending_drop.push(
+                PendingDrop {
+                    ptr: column.raw_swap_remove(row_index),
+                    drop_fn:  column.drop_fn(),
+                }
+            );
         }
 
         self.entities.swap_remove(row_index);
+
+        while drop_guard.next < drop_guard.pending_drop.len() {
+            drop_guard.drop_next();
+        }
 
         if row_index >= self.entities.len() {
             return None;
         }
 
         Some(self.entities[row_index])
-
-        
-
-        // let column_index = self
-        //     .key
-        //     .components
-        //     .binary_search(&TypeId::of::<C>())
-        //     .expect("Error: TypeId of this component does not exist in blobvec");
-
-        // self.columns[column_index].swap_remove(index)
     }
 }
