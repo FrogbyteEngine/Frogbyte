@@ -9,6 +9,21 @@ pub trait ComponentSet {
 }
 
 macro_rules! ComponentSet_tuple_impl {
+    () => {
+        impl ComponentSet for () {
+            fn type_ids() -> Vec<TypeId> {
+                Vec::new()
+            }
+
+            fn push_into(self, _columns: &mut [BlobVec]) {
+            }
+
+            fn create_column() -> Vec<BlobVec> {
+                Vec::new()
+            }
+        }
+    };
+
     ( $( $T:ident ),+ $(,)?) => {
         impl<$($T),+> ComponentSet for ($($T,)+)
         where
@@ -49,6 +64,7 @@ macro_rules! ComponentSet_tuple_impl {
     };  
 }
 
+ComponentSet_tuple_impl!();
 ComponentSet_tuple_impl!(A,);
 ComponentSet_tuple_impl!(A, B,);
 ComponentSet_tuple_impl!(A, B, C,);
