@@ -3,7 +3,7 @@
 use std::{
     alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc},
     any::TypeId,
-    ptr::NonNull,
+    ptr::{self, NonNull},
 };
 
 use crate::component::Component;
@@ -234,6 +234,50 @@ impl BlobVec {
         value_to_remove
     }
 
+    /// Structurally removes the value at `index` without destroying it.
+    ///
+    /// The final initialized value is swapped into `index` when necessary and
+    /// the logical length is reduced. The returned pointer identifies the
+    /// removed initialized value, now outside `0..len`.
+    ///
+    /// The caller is responsible for eventually destroying that value exactly
+    /// once with the destructor associated with this BlobVec before its backing
+    /// allocation is invalidated.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds.
+    pub(crate) fn raw_swap_remove(&mut self, index: usize) -> *mut u8 {
+        assert!(index < self.len);
+
+        // SAFETY: [UNSAFE-020] `index < len`, so for non-ZST storage this
+        // offset identifies an initialized slot inside the allocation. For
+        // ZSTs the offset is zero and the aligned dangling pointer remains
+        // valid for zero-sized pointer operations.
+        let ptr_to_remove = unsafe { self.ptr.add(index * self.layout.size()).as_ptr() };
+
+        // SAFETY: [UNSAFE-021] `len > 0` follows from the bounds check, so
+        // `len - 1` identifies the final initialized component slot. For ZSTs
+        // the zero-sized offset preserves the correctly aligned dangling
+        // pointer.
+        let raw_data_to_swap =
+            unsafe { self.ptr.add((self.len - 1) * self.layout.size()).as_ptr() };
+
+        if self.len - 1 != index {
+            // SAFETY: [UNSAFE-022] For non-ZST storage, `index` and `len - 1`
+            // identify distinct initialized regions of `layout.size()` bytes
+            // within the same allocation, so they do not overlap. For ZSTs the
+            // byte count is zero and no memory is accessed.
+            unsafe {
+                ptr::swap_nonoverlapping(raw_data_to_swap, ptr_to_remove, self.layout.size())
+            };
+        }
+
+        self.len -= 1;
+
+        raw_data_to_swap
+    }
+
     /// Returns the component at `index`, or `None` when out of bounds.
     ///
     /// # Panics
@@ -276,6 +320,20 @@ impl BlobVec {
         // a live initialized `T`. Borrowing `self` mutably provides exclusive access
         // to the returned component for the reference lifetime.
         Some(unsafe { &mut *raw_data })
+    }
+
+    /// Returns the concrete component type stored by this BlobVec.
+    pub fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    /// Returns the type-erased destructor for values stored by this BlobVec.
+    ///
+    /// Calling the returned function is unsafe: its argument must identify one
+    /// live, properly aligned and initialized value of this BlobVec's component
+    /// type that must be destroyed exactly once.
+    pub(crate) fn drop_fn(&self) -> unsafe fn(*mut u8) {
+        self.drop_fn
     }
 
     /// Drops the value at `ptr` as a `T`.
