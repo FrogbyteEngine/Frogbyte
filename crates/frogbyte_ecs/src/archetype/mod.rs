@@ -157,7 +157,7 @@ impl Archetype {
             .binary_search(&TypeId::of::<C>())
             .expect("Error: TypeId of this component does not exist in blobvec");
 
-        &self.columns[column_index]
+        self.columns[column_index]
             .get(row_index)
             .expect("Error: Cannot get component at the corresponding index")
     }
