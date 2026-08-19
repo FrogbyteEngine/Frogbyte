@@ -6,7 +6,10 @@
 
 use std::any::TypeId;
 
-use crate::component::{Component, blobvec::BlobVec};
+use crate::{
+    component::{Component, blobvec::BlobVec},
+    sealed,
+};
 
 /// Describes a set of concrete component values used by an archetype.
 ///
@@ -23,7 +26,7 @@ use crate::component::{Component, blobvec::BlobVec};
 ///   `ArchetypeKey`;
 /// - insert exactly one value into its matching column for each component in
 ///   the set.
-pub trait ComponentSet {
+pub trait ComponentSet: sealed::Sealed {
     /// Returns the concrete component types contained in this set.
     fn type_ids() -> Vec<TypeId>;
 
@@ -45,6 +48,9 @@ pub trait ComponentSet {
 // tuple order, while `push_into` routes each concrete value by its TypeId.
 macro_rules! ComponentSet_tuple_impl {
     () => {
+
+        impl sealed::Sealed for () {}
+
         // The empty tuple represents the empty archetype and therefore has no
         // component types, columns, or values to insert.
         impl ComponentSet for () {
@@ -62,6 +68,12 @@ macro_rules! ComponentSet_tuple_impl {
     };
 
     ( $( $T:ident ),+ $(,)?) => {
+        impl<$($T),+> sealed::Sealed for ($($T,)+)
+        where
+            $($T: Component + 'static),+
+        {
+        }
+
         impl<$($T),+> ComponentSet for ($($T,)+)
         where
             $($T: Component + 'static),+
