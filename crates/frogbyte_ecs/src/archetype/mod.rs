@@ -12,7 +12,7 @@
 //! - Row `i` of every column belongs to `entities[i]`.
 //! - The empty archetype contains no component columns.
 
-use std::{alloc::dealloc, any::TypeId, ops::Index};
+use std::{any::TypeId};
 
 use crate::{
     component::{Component, blobvec::BlobVec, component_set::ComponentSet},
